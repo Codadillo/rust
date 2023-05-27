@@ -562,7 +562,7 @@ impl<'tcx> TyCtxt<'tcx> {
             self.codegen_fn_attrs(def_id)
         } else if matches!(
             def_kind,
-            DefKind::AnonConst | DefKind::AssocConst | DefKind::Const | DefKind::InlineConst
+            DefKind::AnonConst | DefKind::AssocConst | DefKind::Const | DefKind::InlineConst | DefKind::GeneratorInnerFn
         ) {
             CodegenFnAttrs::EMPTY
         } else {

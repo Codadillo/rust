@@ -980,7 +980,8 @@ impl<'a, 'b, 'tcx> BuildReducedGraphVisitor<'a, 'b, 'tcx> {
                 | DefKind::GlobalAsm
                 | DefKind::Closure
                 | DefKind::Impl { .. }
-                | DefKind::Generator,
+                | DefKind::Generator
+                | DefKind::GeneratorInnerFn,
                 _,
             )
             | Res::Local(..)

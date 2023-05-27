@@ -115,6 +115,7 @@ pub fn provide(providers: &mut Providers) {
         mir_const,
         mir_const_qualif,
         mir_promoted,
+        mir_for_generator_inner_fn,
         mir_drops_elaborated_and_const_checked,
         mir_for_ctfe,
         mir_generator_witnesses: generator::mir_generator_witnesses,
@@ -127,6 +128,13 @@ pub fn provide(providers: &mut Providers) {
         deduced_param_attrs: deduce_param_attrs::deduced_param_attrs,
         ..*providers
     };
+}
+
+fn mir_for_generator_inner_fn<'tcx> (
+    _tcx: TyCtxt<'tcx>,
+    _key: LocalDefId
+) -> Option<&'tcx Steal<Body<'tcx>>> {
+    None
 }
 
 fn remap_mir_for_const_eval_select<'tcx>(
@@ -580,6 +588,11 @@ fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
 
 /// Optimize the MIR and prepare it for codegen.
 fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
+    if let Some(body) = tcx.mir_for_generator_inner_fn(did) {
+        // println!("LOL");
+        return tcx.arena.alloc(body.steal());
+    }
+
     tcx.arena.alloc(inner_optimized_mir(tcx, did))
 }
 

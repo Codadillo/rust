@@ -840,7 +840,8 @@ fn should_encode_span(def_kind: DefKind) -> bool {
         | DefKind::Field
         | DefKind::Impl { .. }
         | DefKind::Closure
-        | DefKind::Generator => true,
+        | DefKind::Generator
+        | DefKind::GeneratorInnerFn  => true,
         DefKind::ForeignMod | DefKind::ImplTraitPlaceholder | DefKind::GlobalAsm => false,
     }
 }
@@ -878,7 +879,8 @@ fn should_encode_attrs(def_kind: DefKind) -> bool {
         | DefKind::LifetimeParam
         | DefKind::GlobalAsm
         | DefKind::Closure
-        | DefKind::Generator => false,
+        | DefKind::Generator
+        | DefKind::GeneratorInnerFn => false,
     }
 }
 
@@ -915,7 +917,8 @@ fn should_encode_expn_that_defined(def_kind: DefKind) -> bool {
         | DefKind::LifetimeParam
         | DefKind::GlobalAsm
         | DefKind::Closure
-        | DefKind::Generator => false,
+        | DefKind::Generator
+        | DefKind::GeneratorInnerFn => false,
     }
 }
 
@@ -952,6 +955,7 @@ fn should_encode_visibility(def_kind: DefKind) -> bool {
         | DefKind::Impl { .. }
         | DefKind::Closure
         | DefKind::Generator
+        | DefKind::GeneratorInnerFn
         | DefKind::ExternCrate => false,
     }
 }
@@ -989,6 +993,7 @@ fn should_encode_stability(def_kind: DefKind) -> bool {
         | DefKind::GlobalAsm
         | DefKind::Closure
         | DefKind::Generator
+        | DefKind::GeneratorInnerFn 
         | DefKind::ExternCrate => false,
     }
 }
@@ -1067,6 +1072,7 @@ fn should_encode_variances(def_kind: DefKind) -> bool {
         | DefKind::GlobalAsm
         | DefKind::Closure
         | DefKind::Generator
+        | DefKind::GeneratorInnerFn
         | DefKind::ExternCrate => false,
     }
 }
@@ -1096,7 +1102,8 @@ fn should_encode_generics(def_kind: DefKind) -> bool {
         | DefKind::Field
         | DefKind::TyParam
         | DefKind::Closure
-        | DefKind::Generator => true,
+        | DefKind::Generator
+        | DefKind::GeneratorInnerFn => true,
         DefKind::Mod
         | DefKind::ForeignMod
         | DefKind::ConstParam
@@ -1126,6 +1133,7 @@ fn should_encode_type(tcx: TyCtxt<'_>, def_id: LocalDefId, def_kind: DefKind) ->
         | DefKind::AssocConst
         | DefKind::Closure
         | DefKind::Generator
+        | DefKind::GeneratorInnerFn
         | DefKind::ConstParam
         | DefKind::AnonConst
         | DefKind::InlineConst => true,
@@ -1206,6 +1214,7 @@ fn should_encode_const(def_kind: DefKind) -> bool {
         | DefKind::AssocFn
         | DefKind::Closure
         | DefKind::Generator
+        | DefKind::GeneratorInnerFn
         | DefKind::ConstParam
         | DefKind::InlineConst
         | DefKind::AssocTy

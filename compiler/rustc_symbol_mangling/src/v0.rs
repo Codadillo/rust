@@ -778,6 +778,7 @@ impl<'tcx> Printer<'tcx> for &mut SymbolMangler<'tcx> {
             DefPathData::Ctor => 'c',
             DefPathData::AnonConst => 'k',
             DefPathData::ImplTrait => 'i',
+            DefPathData::GeneratorInnerFn => 'g', // TODO: not sure about this
 
             // These should never show up as `path_append` arguments.
             DefPathData::CrateRoot

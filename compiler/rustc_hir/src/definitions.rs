@@ -272,6 +272,8 @@ pub enum DefPathData {
     LifetimeNs(Symbol),
     /// A closure expression.
     ClosureExpr,
+    /// A continuation function produced by a Generator
+    GeneratorInnerFn,
 
     // Subportions of items:
     /// Implicit constructor for a unit or tuple-like struct or enum variant.
@@ -404,6 +406,8 @@ impl DefPathData {
         match *self {
             TypeNs(name) | ValueNs(name) | MacroNs(name) | LifetimeNs(name) => Some(name),
 
+            GeneratorInnerFn => Some(Symbol::intern("howdy")), // todo: uhhhhhh
+
             Impl | ForeignMod | CrateRoot | Use | GlobalAsm | ClosureExpr | Ctor | AnonConst
             | ImplTrait | ImplTraitAssocTy => None,
         }
@@ -425,6 +429,7 @@ impl DefPathData {
             Ctor => DefPathDataName::Anon { namespace: sym::constructor },
             AnonConst => DefPathDataName::Anon { namespace: sym::constant },
             ImplTrait | ImplTraitAssocTy => DefPathDataName::Anon { namespace: sym::opaque },
+            GeneratorInnerFn => DefPathDataName::Anon { namespace: sym::generator_continuation },
         }
     }
 }

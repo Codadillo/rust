@@ -988,7 +988,7 @@ fn write_mir_sig(tcx: TyCtxt<'_>, body: &Body<'_>, w: &mut dyn Write) -> io::Res
     let def_id = body.source.def_id();
     let kind = tcx.def_kind(def_id);
     let is_function = match kind {
-        DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(..) => true,
+        DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(..) | DefKind::GeneratorInnerFn => true,
         _ => tcx.is_closure(def_id),
     };
     match (kind, body.source.promoted) {
@@ -997,7 +997,7 @@ fn write_mir_sig(tcx: TyCtxt<'_>, body: &Body<'_>, w: &mut dyn Write) -> io::Res
         (DefKind::Static(hir::Mutability::Not), _) => write!(w, "static ")?,
         (DefKind::Static(hir::Mutability::Mut), _) => write!(w, "static mut ")?,
         (_, _) if is_function => write!(w, "fn ")?,
-        (DefKind::AnonConst | DefKind::InlineConst, _) => {} // things like anon const, not an item
+        (DefKind::AnonConst | DefKind::InlineConst | DefKind::GeneratorInnerFn, _) => {} // things like anon const, not an item
         _ => bug!("Unexpected def kind {:?}", kind),
     }
 

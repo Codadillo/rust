@@ -390,6 +390,7 @@ fn encode_ty_name(tcx: TyCtxt<'_>, def_id: DefId) -> String {
             hir::definitions::DefPathData::TypeNs(..) => "t",
             hir::definitions::DefPathData::ValueNs(..) => "v",
             hir::definitions::DefPathData::ClosureExpr => "C",
+            hir::definitions::DefPathData::GeneratorInnerFn => "g", // TODO: really not sure about this
             hir::definitions::DefPathData::Ctor => "c",
             hir::definitions::DefPathData::AnonConst => "k",
             hir::definitions::DefPathData::ImplTrait => "i",

@@ -132,7 +132,7 @@ fn mark_used_by_default_parameters<'tcx>(
     unused_parameters: &mut UnusedGenericParams,
 ) {
     match tcx.def_kind(def_id) {
-        DefKind::Closure | DefKind::Generator => {
+        DefKind::Closure | DefKind::Generator | DefKind::GeneratorInnerFn => { // TODO: not sure about this
             for param in &generics.params {
                 debug!(?param, "(closure/gen)");
                 unused_parameters.mark_used(param.index);

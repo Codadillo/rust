@@ -422,6 +422,16 @@ rustc_queries! {
         separate_provide_extern
     }
 
+    // todo: maybe this shouldn't return a steal, 
+    // but i'm unsure of the best way to integrate the
+    // resultant mir into the mir queries so i'll keep it for now
+    query mir_for_generator_inner_fn(
+        key: LocalDefId
+    ) -> Option<&'tcx Steal<mir::Body<'tcx>>> {
+        desc { |tcx| "caching mir of `{}` for auto-generator internal generator functions", tcx.def_path_str(key.to_def_id()) }
+        feedable
+    }
+
     query mir_promoted(key: LocalDefId) -> (
         &'tcx Steal<mir::Body<'tcx>>,
         &'tcx Steal<IndexVec<mir::Promoted, mir::Body<'tcx>>>
@@ -643,6 +653,7 @@ rustc_queries! {
         desc { |tcx| "checking if `{}` is a foreign item", tcx.def_path_str(key) }
         cache_on_disk_if { key.is_local() }
         separate_provide_extern
+        feedable
     }
 
     /// Returns `Some(generator_kind)` if the node pointed to by `def_id` is a generator.
@@ -795,6 +806,7 @@ rustc_queries! {
         cache_on_disk_if { key.is_local() }
         separate_provide_extern
         cycle_delay_bug
+        feedable
     }
 
     /// Performs lint checking for the module.
@@ -1136,6 +1148,7 @@ rustc_queries! {
         arena_cache
         cache_on_disk_if { def_id.is_local() }
         separate_provide_extern
+        feedable
     }
 
     query asm_target_features(def_id: DefId) -> &'tcx FxIndexSet<Symbol> {

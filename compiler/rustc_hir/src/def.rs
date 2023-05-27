@@ -121,6 +121,7 @@ pub enum DefKind {
     },
     Closure,
     Generator,
+    GeneratorInnerFn,
 }
 
 impl DefKind {
@@ -167,6 +168,7 @@ impl DefKind {
             DefKind::Generator => "generator",
             DefKind::ExternCrate => "extern crate",
             DefKind::GlobalAsm => "global assembly block",
+            DefKind::GeneratorInnerFn => "generator continuation function",
         }
     }
 
@@ -224,6 +226,7 @@ impl DefKind {
             | DefKind::ExternCrate
             | DefKind::Closure
             | DefKind::Generator
+            | DefKind::GeneratorInnerFn
             | DefKind::Use
             | DefKind::ForeignMod
             | DefKind::GlobalAsm
@@ -271,6 +274,7 @@ impl DefKind {
             | DefKind::AnonConst
             | DefKind::InlineConst
             | DefKind::GlobalAsm
+            | DefKind::GeneratorInnerFn
             | DefKind::ExternCrate => false,
         }
     }

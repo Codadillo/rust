@@ -57,6 +57,7 @@ fn assumed_wf_types(tcx: TyCtxt<'_>, def_id: DefId) -> &ty::List<Ty<'_>> {
         | DefKind::LifetimeParam
         | DefKind::GlobalAsm
         | DefKind::Closure
-        | DefKind::Generator => ty::List::empty(),
+        | DefKind::Generator 
+        | DefKind::GeneratorInnerFn => ty::List::empty(),
     }
 }

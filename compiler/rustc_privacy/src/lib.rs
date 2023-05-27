@@ -611,7 +611,8 @@ impl<'tcx> EmbargoVisitor<'tcx> {
             | DefKind::GlobalAsm
             | DefKind::Impl { .. }
             | DefKind::Closure
-            | DefKind::Generator => (),
+            | DefKind::Generator
+            | DefKind::GeneratorInnerFn => (),
         }
     }
 }

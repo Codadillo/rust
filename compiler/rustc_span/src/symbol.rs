@@ -763,6 +763,7 @@ symbols! {
         gen_kill,
         generator,
         generator_clone,
+        generator_continuation,
         generator_state,
         generators,
         generic_arg_infer,
