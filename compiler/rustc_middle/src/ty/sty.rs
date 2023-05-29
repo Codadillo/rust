@@ -3,6 +3,7 @@
 #![allow(rustc::usage_of_ty_tykind)]
 
 use crate::infer::canonical::Canonical;
+use crate::query::Key;
 use crate::ty::subst::{GenericArg, InternalSubsts, SubstsRef};
 use crate::ty::visit::ValidateBoundVars;
 use crate::ty::InferTy::*;
@@ -364,6 +365,7 @@ pub struct GeneratorSubstsParts<'tcx, T> {
     pub return_ty: T,
     pub witness: T,
     pub tupled_upvars_ty: T,
+    // pub resume_ptr_ty: T,
 }
 
 impl<'tcx> GeneratorSubsts<'tcx> {
@@ -382,6 +384,7 @@ impl<'tcx> GeneratorSubsts<'tcx> {
                         parts.return_ty,
                         parts.witness,
                         parts.tupled_upvars_ty,
+                        // parts.resume_ptr_ty,
                     ]
                     .iter()
                     .map(|&ty| ty.into()),
@@ -394,17 +397,24 @@ impl<'tcx> GeneratorSubsts<'tcx> {
     /// The ordering assumed here must match that used by `GeneratorSubsts::new` above.
     fn split(self) -> GeneratorSubstsParts<'tcx, GenericArg<'tcx>> {
         match self.substs[..] {
-            [ref parent_substs @ .., resume_ty, yield_ty, return_ty, witness, tupled_upvars_ty] => {
-                GeneratorSubstsParts {
-                    parent_substs,
-                    resume_ty,
-                    yield_ty,
-                    return_ty,
-                    witness,
-                    tupled_upvars_ty,
-                }
-            }
-            _ => bug!("generator substs missing synthetics"),
+            [
+                ref parent_substs @ ..,
+                resume_ty,
+                yield_ty,
+                return_ty,
+                witness,
+                tupled_upvars_ty,
+                // resume_ptr_ty,
+            ] => GeneratorSubstsParts {
+                parent_substs,
+                resume_ty,
+                yield_ty,
+                return_ty,
+                witness,
+                tupled_upvars_ty,
+                // resume_ptr_ty,
+            },
+            _ => bug!("generator substs missing synthetics {:?}", self.substs),
         }
     }
 
@@ -571,13 +581,6 @@ impl<'tcx> GeneratorSubsts<'tcx> {
                 ty::EarlyBinder(layout.field_tys[*field].ty).subst(tcx, self.substs)
             })
         })
-    }
-
-    /// This is the types of the fields of a generator which are not stored in a
-    /// variant.
-    #[inline]
-    pub fn prefix_tys(self) -> impl Iterator<Item = Ty<'tcx>> {
-        self.upvar_tys()
     }
 }
 
@@ -2399,6 +2402,63 @@ impl<'tcx> Ty<'tcx> {
             },
             _ => None,
         }
+    }
+
+    /// This returns the type of the generator's inner resume function
+    pub fn generator_inner_resume_ty(
+        self,
+        tcx: TyCtxt<'tcx>,
+    ) -> Option<ty::EarlyBinder<PolyFnSig<'tcx>>> {
+        let TyKind::Generator(id, substs, _) = self.kind() else {
+            return None;
+        };
+
+        // Create the type of the self arg: Pin<&mut [generator_type]>
+        let pin_ref_gen_ty = {
+            let ref_gen_ty = tcx.mk_ref(
+                tcx.lifetimes.re_erased,
+                TypeAndMut { ty: self, mutbl: rustc_ast::Mutability::Mut },
+            );
+            let pin_did = tcx.require_lang_item(LangItem::Pin, Some(self.default_span(tcx))); // todo: use a different span?
+            let pin_adt_ref = tcx.adt_def(pin_did);
+            let pin_substs = tcx.mk_substs(&[ref_gen_ty.into()]);
+            tcx.mk_adt(pin_adt_ref, pin_substs)
+        };
+
+        // Create the type of the resume arg and return value
+        let gen_substs = substs.as_generator();
+        let (return_ty, resume_ty) = match tcx.generator_kind(id).unwrap() {
+            hir::GeneratorKind::Async(_) => unimplemented!(),
+            hir::GeneratorKind::Gen => {
+                let state_did = tcx.require_lang_item(LangItem::GeneratorState, None);
+                let state_adt_ref = tcx.adt_def(state_did);
+                let state_substs =
+                    tcx.mk_substs(&[gen_substs.yield_ty().into(), gen_substs.return_ty().into()]);
+                let ret_ty = tcx.mk_adt(state_adt_ref, state_substs);
+
+                (ret_ty, gen_substs.resume_ty())
+            }
+        };
+
+        // Create the type of the fn pointer: fn(Pin<&mut [generator_type]>, resume_ty) -> return_ty
+        Some(ty::EarlyBinder(ty::Binder::dummy(ty::FnSig {
+            inputs_and_output: tcx.mk_type_list(&[pin_ref_gen_ty, resume_ty, return_ty]),
+            c_variadic: false,
+            unsafety: hir::Unsafety::Normal,
+            abi: Abi::Rust,
+        })))
+    }
+
+    /// This returns the types of the fields of the generator which are not stored in a
+    /// variant.
+    pub fn generator_prefix_tys(self, tcx: TyCtxt<'tcx>) -> Option<impl Iterator<Item = Ty<'tcx>>> {
+        let TyKind::Generator(_, substs, _) = self.kind() else {
+            return None;
+        };
+
+        let gen_substs = substs.as_generator();
+        let resume_ty = tcx.mk_fn_ptr(self.generator_inner_resume_ty(tcx).unwrap().0);
+        Some(gen_substs.upvar_tys().chain([resume_ty]))
     }
 }
 

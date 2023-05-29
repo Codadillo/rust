@@ -142,7 +142,8 @@ impl From<DefKind> for ItemType {
             | DefKind::GlobalAsm
             | DefKind::Impl { .. }
             | DefKind::Closure
-            | DefKind::Generator => Self::ForeignType,
+            | DefKind::Generator
+            | DefKind::GeneratorInnerFn  => Self::ForeignType,
         }
     }
 }

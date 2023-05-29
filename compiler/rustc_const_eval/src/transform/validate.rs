@@ -392,7 +392,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                         };
                         check_equal(self, location, f_ty);
                     }
-                    &ty::Generator(def_id, substs, _) => {
+                    &ty::Generator(def_id, _, _) => {
                         let f_ty = if let Some(var) = parent_ty.variant_index {
                             let gen_body = if def_id == self.body.source.def_id() {
                                 self.body
@@ -417,7 +417,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
 
                             f_ty.ty
                         } else {
-                            let Some(f_ty) = substs.as_generator().prefix_tys().nth(f.index()) else {
+                            let Some(f_ty) = parent_ty.ty.generator_prefix_tys(self.tcx).unwrap().nth(f.index()) else {
                                 fail_out_of_bounds(self, location);
                                 return;
                             };

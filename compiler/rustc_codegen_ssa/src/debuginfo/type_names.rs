@@ -417,13 +417,14 @@ fn push_debuginfo_type_name<'tcx>(
         ty::Param(_) => {
             write!(output, "{:?}", t).unwrap();
         }
+        ty::GeneratorWitness(..) => output.push_str("[uhhhh lol]"), // todo: yeah, i guess it doesn't expect these extra substs on function calls. or something idk
         ty::Error(_)
         | ty::Infer(_)
         | ty::Placeholder(..)
         | ty::Alias(..)
         | ty::Bound(..)
         | ty::GeneratorWitnessMIR(..)
-        | ty::GeneratorWitness(..) => {
+        /*| ty::GeneratorWitness(..)*/ => {
             bug!(
                 "debuginfo: Trying to create type name for \
                   unexpected type: {:?}",

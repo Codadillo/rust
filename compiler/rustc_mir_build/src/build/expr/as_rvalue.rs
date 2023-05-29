@@ -457,8 +457,27 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
                 let result = match substs {
                     UpvarSubsts::Generator(substs) => {
+                        // Make sure we set the inner resume function pointer
+                        // correctly, along with the upvars.
+                        // let (resume_fn, resume_ptr_ty) =
+                        //     this.tcx.generator_unresumed_inner_fn(closure_id.to_def_id()).unwrap();
+                        // let resume_ptr_local = this.temp(resume_ptr_ty, expr_span);
+                        // this.cfg.push_assign(
+                        //     block,
+                        //     source_info,
+                        //     resume_ptr_local,
+                        //     Rvalue::Cast(
+                        //         CastKind::Pointer(PointerCast::ReifyFnPointer),
+                        //         resume_fn,
+                        //         resume_ptr_ty,
+                        //     ),
+                        // );
+
+                        // operands.push(Operand::Move(resume_ptr_local.into()));
+
                         // We implicitly set the discriminant to 0. See
                         // librustc_mir/transform/deaggregator.rs for details.
+                        // todo: the above file doesn't seem to exist anymore (?)
                         let movability = movability.unwrap();
                         Box::new(AggregateKind::Generator(
                             closure_id.to_def_id(),

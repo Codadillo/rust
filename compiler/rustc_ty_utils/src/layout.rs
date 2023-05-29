@@ -619,7 +619,7 @@ fn generator_layout<'tcx>(
     // Build a prefix layout, including "promoting" all ineligible
     // locals as part of the prefix. We compute the layout of all of
     // these fields at once to get optimal packing.
-    let tag_index = substs.as_generator().prefix_tys().count();
+    let tag_index = ty.generator_prefix_tys(cx.tcx).unwrap().count();
 
     // `info.variant_fields` already accounts for the reserved variants, so no need to add them.
     let max_discr = (info.variant_fields.len() - 1) as u128;
@@ -635,9 +635,9 @@ fn generator_layout<'tcx>(
         .map(|local| subst_field(info.field_tys[local].ty))
         .map(|ty| tcx.mk_maybe_uninit(ty))
         .map(|ty| Ok(cx.layout_of(ty)?.layout));
-    let prefix_layouts = substs
-        .as_generator()
-        .prefix_tys()
+    let prefix_layouts = ty
+        .generator_prefix_tys(cx.tcx)
+        .unwrap()
         .map(|ty| Ok(cx.layout_of(ty)?.layout))
         .chain(iter::once(Ok(tag_layout)))
         .chain(promoted_layouts)

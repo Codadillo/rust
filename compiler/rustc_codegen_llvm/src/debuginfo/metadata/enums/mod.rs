@@ -335,11 +335,6 @@ pub fn build_generator_variant_struct_type_di_node<'ll, 'tcx>(
 
     let variant_layout = generator_type_and_layout.for_variant(cx, variant_index);
 
-    let generator_substs = match generator_type_and_layout.ty.kind() {
-        ty::Generator(_, substs, _) => substs.as_generator(),
-        _ => unreachable!(),
-    };
-
     type_map::build_type_with_children(
         cx,
         type_map::stub(
@@ -378,8 +373,10 @@ pub fn build_generator_variant_struct_type_di_node<'ll, 'tcx>(
                 .collect();
 
             // Fields that are common to all states
-            let common_fields: SmallVec<_> = generator_substs
-                .prefix_tys()
+            let common_fields: SmallVec<_> = generator_type_and_layout
+                .ty
+                .generator_prefix_tys(cx.tcx)
+                .unwrap()
                 .enumerate()
                 .map(|(index, upvar_ty)| {
                     build_field_di_node(

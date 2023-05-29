@@ -63,6 +63,9 @@ use rustc_index::{Idx, IndexVec};
 use rustc_middle::mir::dump_mir;
 use rustc_middle::mir::visit::{MutVisitor, PlaceContext, Visitor};
 use rustc_middle::mir::*;
+use rustc_middle::ty::adjustment::PointerCast;
+use rustc_middle::ty::EarlyBinder;
+use rustc_middle::ty::PolyFnSig;
 use rustc_middle::ty::{self, AdtDef, Ty, TyCtxt};
 use rustc_middle::ty::{GeneratorSubsts, SubstsRef};
 use rustc_mir_dataflow::impls::{
@@ -75,7 +78,7 @@ use rustc_span::symbol::sym;
 use rustc_span::Span;
 use rustc_target::abi::{FieldIdx, VariantIdx};
 use rustc_target::spec::PanicStrategy;
-use std::{iter, ops};
+use std::ops;
 
 pub struct StateTransform;
 
@@ -237,6 +240,16 @@ struct TransformVisitor<'tcx> {
     // A list of suspension points, generated during the transform
     suspension_points: Vec<SuspensionPoint<'tcx>>,
 
+    // Mapping from a generator state to the corresponding inner resume function
+    resume_fns: FxHashMap<VariantIdx, (FabricatedFnBuilder<'tcx>, Operand<'tcx>)>,
+
+    // The field corresponding to the inner resume function pointer
+    resume_fn_field_idx: FieldIdx,
+    resume_fn_field_place: Place<'tcx>,
+
+    // The type of the inner resume function pointer
+    inner_resume_ptr_ty: Ty<'tcx>,
+
     // The set of locals that have no `StorageLive`/`StorageDead` annotations.
     always_live_locals: BitSet<Local>,
 
@@ -304,14 +317,19 @@ impl<'tcx> TransformVisitor<'tcx> {
     }
 
     // Create a statement which changes the discriminant
+    // todo: rename this. we're not using dicsriminants anymore
     fn set_discr(&self, state_disc: VariantIdx, source_info: SourceInfo) -> Statement<'tcx> {
-        let self_place = Place::from(SELF_ARG);
+        let (_, function_handle) = self.resume_fns.get(&state_disc).unwrap();
         Statement {
             source_info,
-            kind: StatementKind::SetDiscriminant {
-                place: Box::new(self_place),
-                variant_index: state_disc,
-            },
+            kind: StatementKind::Assign(Box::new((
+                self.resume_fn_field_place,
+                Rvalue::Cast(
+                    CastKind::Pointer(PointerCast::ReifyFnPointer),
+                    function_handle.clone(),
+                    self.inner_resume_ptr_ty,
+                ),
+            ))),
         }
     }
 
@@ -409,29 +427,33 @@ impl<'tcx> MutVisitor<'tcx> for TransformVisitor<'tcx> {
     }
 }
 
+fn create_ref_gen_ty<'tcx>(tcx: TyCtxt<'tcx>, gen_ty: Ty<'tcx>) -> Ty<'tcx> {
+    tcx.mk_ref(tcx.lifetimes.re_erased, ty::TypeAndMut { ty: gen_ty, mutbl: Mutability::Mut })
+}
+
 fn make_generator_state_argument_indirect<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     let gen_ty = body.local_decls.raw[1].ty;
 
-    let ref_gen_ty =
-        tcx.mk_ref(tcx.lifetimes.re_erased, ty::TypeAndMut { ty: gen_ty, mutbl: Mutability::Mut });
-
     // Replace the by value generator argument
-    body.local_decls.raw[1].ty = ref_gen_ty;
+    body.local_decls.raw[1].ty = create_ref_gen_ty(tcx, gen_ty);
 
     // Add a deref to accesses of the generator state
     DerefArgVisitor { tcx }.visit_body(body);
 }
 
+fn create_pin_ref_gen_ty<'tcx>(tcx: TyCtxt<'tcx>, ref_gen_ty: Ty<'tcx>, span: Span) -> Ty<'tcx> {
+    let pin_did = tcx.require_lang_item(LangItem::Pin, Some(span));
+    let pin_adt_ref = tcx.adt_def(pin_did);
+    let substs = tcx.mk_substs(&[ref_gen_ty.into()]);
+
+    tcx.mk_adt(pin_adt_ref, substs)
+}
+
 fn make_generator_state_argument_pinned<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     let ref_gen_ty = body.local_decls.raw[1].ty;
 
-    let pin_did = tcx.require_lang_item(LangItem::Pin, Some(body.span));
-    let pin_adt_ref = tcx.adt_def(pin_did);
-    let substs = tcx.mk_substs(&[ref_gen_ty.into()]);
-    let pin_ref_gen_ty = tcx.mk_adt(pin_adt_ref, substs);
-
     // Replace the by ref generator argument
-    body.local_decls.raw[1].ty = pin_ref_gen_ty;
+    body.local_decls.raw[1].ty = create_pin_ref_gen_ty(tcx, ref_gen_ty, body.span);
 
     // Add the Pin field access to accesses of the generator state
     PinArgVisitor { ref_gen_ty, tcx }.visit_body(body);
@@ -969,7 +991,7 @@ fn compute_layout<'tcx>(
     // Build the generator variant field list.
     // Create a map from local indices to generator struct indices.
     let mut variant_fields: IndexVec<VariantIdx, IndexVec<FieldIdx, GeneratorSavedLocal>> =
-        iter::repeat(IndexVec::new()).take(RESERVED_VARIANTS).collect();
+        IndexVec::from_raw(vec![IndexVec::new(); RESERVED_VARIANTS]);
     let mut remap = FxHashMap::default();
     for (suspension_point_idx, live_locals) in live_locals_at_suspension_points.iter().enumerate() {
         let variant_index = VariantIdx::from(RESERVED_VARIANTS + suspension_point_idx);
@@ -1222,12 +1244,11 @@ fn can_unwind<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
 
 fn create_generator_resume_function<'tcx>(
     tcx: TyCtxt<'tcx>,
-    transform: TransformVisitor<'tcx>,
+    mut transform: TransformVisitor<'tcx>,
     body: &mut Body<'tcx>,
     can_return: bool,
+    can_unwind: bool,
 ) {
-    let can_unwind = can_unwind(tcx, body);
-
     // Poison the generator when it unwinds
     if can_unwind {
         let source_info = SourceInfo::outermost(body.span);
@@ -1283,66 +1304,73 @@ fn create_generator_resume_function<'tcx>(
         );
     }
 
+    // Grab the type of the generator for later
+    let gen_ty = body.local_decls[SELF_ARG].ty;
+
+    // IF YOU REMOVE THIS: add a new dummy block to be overwritten with the goto/call blocks
     insert_switch(body, &cases, &transform, TerminatorKind::Unreachable);
 
+    // Fix things up before we split body into multiple inner resumption functions
+    // We'd rather do this once now rather than multiple times later
     make_generator_state_argument_indirect(tcx, body);
     make_generator_state_argument_pinned(tcx, body);
     deref_finder(tcx, body);
 
-    // Split our body into one body for each case
-    // Then, create a function corresponding to each case
-    // using these bodies
-    let source_info = SourceInfo::outermost(body.span); // todo: use generator_layout.variant_source_info instead?
-    let resume_fns = cases.into_iter().map(|(state, mut case_start)| {
-        let mut body = body.clone();
+    // Split our body into one body for each case.
+    // Then, assign these bodies to our resume functions accordingly
+    let source_info = SourceInfo::outermost(body.span);
+    for (state, mut case_start) in cases {
+        let mut inner_body = body.clone();
+        // todo: should I make these new bodies not generators? i.e.
+        // inner_body.generator = None;
 
-        // We add one because the earlier insert_switch call shifted everything over by 1
         case_start = BasicBlock::new(case_start.index() + 1);
 
-        body.basic_blocks_mut()[START_BLOCK] = BasicBlockData::new(Some(Terminator {
-            source_info,
+        inner_body.basic_blocks_mut()[START_BLOCK] = BasicBlockData::new(Some(Terminator {
+            source_info, // todo: use generator_layout.variant_source_info instead?
             kind: TerminatorKind::Goto { target: case_start },
         }));
 
-        simplify::remove_dead_blocks(tcx, &mut body);
-        
-        dump_mir(tcx, false, "generator_resume_inner", &state, &body, |_, _| Ok(()));
-        
-        let source_def_id = body.source.def_id().expect_local();
-        let def_id = fabricate_fn(tcx, source_def_id, body);
+        simplify::remove_dead_blocks(tcx, &mut inner_body);
 
-        (case_start, def_id)
-    }).collect::<Vec<_>>();
+        dump_mir(tcx, false, "generator_resume_inner", &state, &inner_body, |_, _| Ok(()));
 
-    // For now, leave the outer body just a switch statement where
-    // each branch just calls the corresponding inner function
-    let span = body.span;
+        // Finish building our inner resume function
+        let (resume_builder, _) = transform.resume_fns.remove(&VariantIdx::new(state)).unwrap();
+        resume_builder.build(inner_body);
+    }
+
+    // Convert the outer resume function into a simple function call of
+    // the inner resume function pointer
     let blocks = body.basic_blocks_mut();
     let ret_block = blocks
         .push(BasicBlockData::new(Some(Terminator { source_info, kind: TerminatorKind::Return })));
-    for (case_start, resume_fn) in resume_fns {
-        let func = Operand::function_handle(
-            tcx,
-            resume_fn.to_def_id(),
-            tcx.mk_substs(&[]), // todo: idk what this should be
-            span,
-        );
-        blocks[case_start] = BasicBlockData::new(Some(Terminator {
-            source_info,
-            kind: TerminatorKind::Call {
-                func,
-                args: vec![
-                    Operand::Move(Local::new(1).into()), // self arg
-                    Operand::Move(Local::new(2).into()), // resume arg
-                ],
-                destination: RETURN_PLACE.into(),
-                target: Some(ret_block),
-                unwind: UnwindAction::Continue, // todo: idk this seems right
-                from_hir_call: false,
-                fn_span: span,
-            },
-        }));
-    }
+
+    let call_inner = TerminatorKind::Call {
+        func: Operand::Copy(Place {
+            local: SELF_ARG,
+            projection: tcx.mk_place_elems(&[
+                ProjectionElem::Field(FieldIdx::new(0), create_ref_gen_ty(tcx, gen_ty)),
+                ProjectionElem::Deref,
+                ProjectionElem::Field(transform.resume_fn_field_idx, transform.inner_resume_ptr_ty),
+            ]),
+        }),
+        args: vec![
+            Operand::Move(Local::new(1).into()), // self arg
+            Operand::Move(Local::new(2).into()), // resume arg
+        ],
+        destination: RETURN_PLACE.into(),
+        target: Some(ret_block),
+        unwind: UnwindAction::Continue, // todo: idk this seems right
+        from_hir_call: false,
+        fn_span: body.span,
+    };
+
+    body[START_BLOCK] = BasicBlockData::new(Some(Terminator {
+        source_info,
+        kind: call_inner,
+    }));
+    deref_finder(tcx, body);
 
     // Make sure we remove dead blocks to remove
     // unrelated code from the drop part of the function
@@ -1485,6 +1513,56 @@ pub(crate) fn mir_generator_witnesses<'tcx>(
 impl<'tcx> MirPass<'tcx> for StateTransform {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         let Some(yield_ty) = body.yield_ty() else {
+            // Initialize the inner resume function pointer properly whenever
+            // constructing a generator. 
+            // todo: this definitely shouldn't happen here, and not as an mir pass at all
+            // ideally, it happens in rustc_mir_build or something (maybe codegen, to mirror the discriminant being set to 0)
+            let constructors = body.basic_blocks_mut().iter().enumerate().map(|(i, data)| {
+                data.statements.iter().enumerate().filter_map(move |(j, stmnt)| {
+                    let StatementKind::Assign(box (_, Rvalue::Aggregate(box AggregateKind::Generator(id, _, _), _)))
+                    = stmnt.kind else {
+                        return None;
+                    };
+
+                    Some((i, j, id))
+                }).rev()
+            }).flatten().collect::<Vec<_>>();
+
+            let source_info = SourceInfo::outermost(body.span);
+            for &(block_idx, stmt_idx, gen_id) in &constructors {
+                let (resume_fn, resume_ptr_ty) =
+                    tcx.generator_unresumed_inner_fn(gen_id).unwrap();
+                let resume_ptr_local = body.local_decls.push(LocalDecl::new(resume_ptr_ty, body.span));
+
+                let block = &mut body.basic_blocks_mut()[BasicBlock::new(block_idx)];
+
+                let StatementKind::Assign(box (_, Rvalue::Aggregate(box AggregateKind::Generator(_, _, _), fields)))
+                        = &mut block.statements[stmt_idx].kind else {
+                        bug!("This should be unreachable");
+                };
+
+                fields.push(Operand::Move(resume_ptr_local.into()));
+
+                block.statements.insert(
+                    stmt_idx,
+                    Statement {
+                        source_info,
+                        kind: StatementKind::Assign(Box::new((
+                            resume_ptr_local.into(),
+                            Rvalue::Cast(
+                                CastKind::Pointer(PointerCast::ReifyFnPointer),
+                                resume_fn,
+                                resume_ptr_ty,
+                            )
+                        )))
+                    }
+                );
+            }
+
+            if constructors.len() > 0 {
+                dump_mir(tcx, false, "generator_constructor-fixed", &0, body, |_, _| Ok(()));
+            }
+
             // This only applies to generators
             return;
         };
@@ -1497,10 +1575,11 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
         let gen_ty = body.local_decls.raw[1].ty;
 
         // Get the discriminant type and substs which typeck computed
-        let (discr_ty, upvars, interior, movable) = match *gen_ty.kind() {
+        let (gen_substs, discr_ty, upvars, interior, movable) = match *gen_ty.kind() {
             ty::Generator(_, substs, movability) => {
                 let substs = substs.as_generator();
                 (
+                    substs,
                     substs.discr_ty(tcx),
                     substs.upvar_tys().collect::<Vec<_>>(),
                     substs.witness(),
@@ -1589,6 +1668,44 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
         }
 
         let can_return = can_return(tcx, body, tcx.param_env(body.source.def_id()));
+        let can_unwind = can_unwind(tcx, body);
+
+        // Calculate the type and place of the inner resume function pointer prefix field
+        let (inner_resume_ptr_ty, resume_fn_field_idx) = {
+            let prefix_tys = gen_ty.generator_prefix_tys(tcx).unwrap();
+
+            // The function pointer field should be the last prefix type
+            let (field_count, ty) = prefix_tys.fold((0, None), |(idx, _), ty| (idx + 1, Some(ty)));
+            let ty = ty.unwrap();
+            let field_idx = FieldIdx::new(field_count - 1);
+
+            (ty, field_idx)
+        };
+        let resume_fn_field_place =
+            tcx.mk_place_field(SELF_ARG.into(), resume_fn_field_idx, inner_resume_ptr_ty);
+
+        // Create the stubs for our inner resume functions, one for each state
+        let mut resume_fns = FxHashMap::default();
+        for state in 0..layout.variant_fields.len() {
+            if (!can_return && state == RETURNED) || (!can_unwind && state == POISONED) {
+                continue;
+            }
+
+            let fabricated_stub = FabricatedFnBuilder::new(
+                tcx,
+                body.span,
+                body.source.def_id().expect_local(),
+                Some(gen_ty.generator_inner_resume_ty(tcx).unwrap()), // todo: I'd prefer to not re-create the sig so many times
+            );
+            let resume_handle = fabricated_stub.function_handle(gen_substs.substs); // todo: idk if these are the right substs to use, seems like it though
+
+            resume_fns.insert(VariantIdx::new(state), (fabricated_stub, resume_handle));
+        }
+
+        body.generator.as_mut().unwrap().unresumed_inner_func = Some((
+            resume_fns.get(&VariantIdx::new(UNRESUMED)).unwrap().1.clone(),
+            inner_resume_ptr_ty,
+        ));
 
         // Run the transformation which converts Places from Local to generator struct
         // accesses for locals in `remap`.
@@ -1606,6 +1723,10 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
             suspension_points: Vec::new(),
             new_ret_local,
             discr_ty,
+            resume_fns,
+            resume_fn_field_idx,
+            resume_fn_field_place,
+            inner_resume_ptr_ty,
         };
         transform.visit_body(body);
 
@@ -1638,103 +1759,89 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
         dump_mir(tcx, false, "generator_post-transform", &0, body, |_, _| Ok(()));
 
         // Create a copy of our MIR and use it to create the drop shim for the generator
-        let drop_shim = create_generator_drop_shim(tcx, &transform, gen_ty, body.clone(), drop_clean);
+        let drop_shim =
+            create_generator_drop_shim(tcx, &transform, gen_ty, body.clone(), drop_clean);
 
         body.generator.as_mut().unwrap().generator_drop = Some(drop_shim);
 
         // Create the Generator::resume / Future::poll function
-        create_generator_resume_function(tcx, transform, body, can_return);
-
-        // // Run derefer to fix Derefs that are not in the first place
-        // deref_finder(tcx, body);
-
-        // Create the internal function to be shimmed
-        // let source_def_id = body.source.def_id().expect_local();
-        // let inner_def_id = fabricate_fn(tcx, source_def_id, body.clone());
-
-        // Turn the outer function into a shim for the inner one
-        // let new_blocks = {
-        //     let mut blocks = IndexVec::new();
-        //     let source_info = SourceInfo::outermost(body.span);
-
-        //     let start_block = blocks.push(BasicBlockData {
-        //         statements: vec![],
-        //         terminator: None,
-        //         is_cleanup: false,
-        //     });
-        //     let ret_block = blocks.push(BasicBlockData {
-        //         statements: vec![],
-        //         terminator: Some(Terminator { source_info, kind: TerminatorKind::Return }),
-        //         is_cleanup: false,
-        //     });
-
-        //     let func = Operand::function_handle(
-        //         tcx,
-        //         inner_def_id.to_def_id(),
-        //         tcx.mk_substs(&[]), // todo: idk what this should be
-        //         body.span,
-        //     );
-        //     blocks[start_block].terminator = Some(Terminator {
-        //         source_info,
-        //         kind: TerminatorKind::Call {
-        //             func,
-        //             args: vec![
-        //                 Operand::Move(Local::new(1).into()),
-        //                 Operand::Move(Local::new(2).into()),
-        //             ],
-        //             destination: RETURN_PLACE.into(),
-        //             target: Some(ret_block),
-        //             unwind: UnwindAction::Continue, // todo: idk this seems right
-        //             from_hir_call: false,
-        //             fn_span: body.span,
-        //         },
-        //     });
-
-        //     blocks
-        // };
-
-        // body.basic_blocks = BasicBlocks::new(new_blocks);
-
-        // dump_mir(tcx, false, "GENERATOR_WRAPPER", &0, &body, |_, _| Ok(()));
-        // dump_mir(tcx, false, "GENERATOR_INNER", &0, tcx.optimized_mir(inner_def_id), |_, _| Ok(()));
+        // as well as the internal fabricated functions that are called
+        // by the main resume / poll function
+        create_generator_resume_function(tcx, transform, body, can_return, can_unwind);
     }
 }
 
-fn fabricate_fn<'tcx>(
+struct FabricatedFnBuilder<'tcx> {
     tcx: TyCtxt<'tcx>,
-    source_def_id: LocalDefId,
-    mut body: Body<'tcx>,
-) -> LocalDefId {
-    let feeder = tcx
-        .at(body.span)
-        .create_def(source_def_id, hir::definitions::DefPathData::GeneratorInnerFn);
+    feeder: ty::TyCtxtFeed<'tcx, LocalDefId>,
+    span: Span,
+}
 
-    feeder.opt_def_kind(Some(hir::def::DefKind::GeneratorInnerFn));
-    feeder.opt_local_def_id_to_hir_id(None);
-    feeder.def_ident_span(Some(body.span));
+impl<'tcx> FabricatedFnBuilder<'tcx> {
+    #[must_use = "do not ever fabricate an fn without a body"]
+    fn new(
+        tcx: TyCtxt<'tcx>,
+        span: Span,
+        source_def_id: LocalDefId,
+        temp_sig: Option<EarlyBinder<PolyFnSig<'tcx>>>,
+    ) -> Self {
+        let feeder =
+            tcx.at(span).create_def(source_def_id, hir::definitions::DefPathData::GeneratorInnerFn);
 
-    feeder.generics_of(tcx.generics_of(source_def_id).clone());
-    feeder.explicit_predicates_of(tcx.explicit_predicates_of(source_def_id));
-    feeder.inferred_outlives_of(tcx.inferred_outlives_of(source_def_id));
-    feeder.type_of(tcx.type_of(source_def_id));
-    feeder.is_foreign_item(false);
-    feeder.codegen_fn_attrs(rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs::EMPTY.clone());
+        feeder.opt_def_kind(Some(hir::def::DefKind::GeneratorInnerFn));
+        feeder.opt_local_def_id_to_hir_id(None);
+        feeder.def_ident_span(Some(span));
 
-    let mut sig_types: Vec<Ty<'_>> =
-        body.local_decls.raw.iter().skip(1).take(body.arg_count).map(|l| l.ty.into()).collect();
-    sig_types.push(body.local_decls.raw[0].ty.into());
-    feeder.fn_sig(ty::EarlyBinder(ty::Binder::dummy(ty::FnSig {
-        inputs_and_output: tcx.mk_type_list(&sig_types),
-        c_variadic: false,
-        unsafety: hir::Unsafety::Normal,
-        abi: rustc_target::spec::abi::Abi::Rust,
-    })));
+        feeder.generics_of(tcx.generics_of(source_def_id).clone());
+        feeder.explicit_predicates_of(tcx.explicit_predicates_of(source_def_id));
+        feeder.inferred_outlives_of(tcx.inferred_outlives_of(source_def_id));
+        feeder.type_of(tcx.type_of(source_def_id));
+        feeder.is_foreign_item(false);
+        feeder.codegen_fn_attrs(
+            rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs::EMPTY.clone(),
+        );
 
-    let def_id: LocalDefId = feeder.def_id();
-    body.source = MirSource::item(def_id.to_def_id());
-    feeder.mir_for_generator_inner_fn(Some(tcx.alloc_steal_mir(body)));
+        // We throw a temporary sig in there for any mir dumps, etc.,
+        // that happen before this fn is fully built
+        if let Some(temp_sig) = temp_sig {
+            feeder.fn_sig(temp_sig);
+        }
 
-    def_id
+        Self { tcx, feeder, span }
+    }
+
+    fn sig_from_body(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> EarlyBinder<PolyFnSig<'tcx>> {
+        let sig_types = body
+            .local_decls
+            .raw
+            .iter()
+            .skip(1)
+            .take(body.arg_count)
+            .chain([&body.local_decls[RETURN_PLACE]])
+            .map(|l| Ty::from(l.ty));
+
+        EarlyBinder(ty::Binder::dummy(ty::FnSig {
+            inputs_and_output: tcx.mk_type_list_from_iter(sig_types),
+            c_variadic: false,
+            unsafety: hir::Unsafety::Normal,
+            abi: rustc_target::spec::abi::Abi::Rust,
+        }))
+    }
+
+    fn def_id(&self) -> LocalDefId {
+        self.feeder.def_id()
+    }
+
+    fn function_handle(&self, substs: SubstsRef<'tcx>) -> Operand<'tcx> {
+        Operand::function_handle(self.tcx, self.def_id().to_def_id(), substs, self.span)
+    }
+
+    fn build(self, mut body: Body<'tcx>) {
+        self.feeder.fn_sig(Self::sig_from_body(self.tcx, &body));
+
+        body.source = MirSource::item(self.def_id().to_def_id());
+        self.feeder.mir_for_generator_inner_fn(Some(self.tcx.alloc_steal_mir(body)));
+    }
 }
 
 /// Looks for any assignments between locals (e.g., `_4 = _5`) that will both be converted to fields

@@ -215,6 +215,9 @@ pub struct GeneratorInfo<'tcx> {
     /// The layout of a generator. Produced by the state transformation.
     pub generator_layout: Option<GeneratorLayout<'tcx>>,
 
+    // todo
+    pub unresumed_inner_func: Option<(Operand<'tcx>, Ty<'tcx>)>,
+
     /// If this is a generator then record the type of source expression that caused this generator
     /// to be created.
     pub generator_kind: GeneratorKind,
@@ -339,6 +342,7 @@ impl<'tcx> Body<'tcx> {
                     generator_drop: None,
                     generator_layout: None,
                     generator_kind,
+                    unresumed_inner_func: None,
                 })
             }),
             local_decls,
@@ -2165,9 +2169,15 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                         if let Some(def_id) = def_id.as_local()
                             && let Some(upvars) = tcx.upvars_mentioned(def_id)
                         {
-                            for (&var_id, place) in iter::zip(upvars.keys(), places) {
-                                let var_name = tcx.hir().name(var_id);
-                                struct_fmt.field(var_name.as_str(), place);
+                            for (var_id, place) in iter::zip(
+                                upvars.keys().map(Some).chain(iter::repeat(None)), 
+                                places
+                            ) 
+                            {
+                                match var_id {
+                                    Some(&id) => struct_fmt.field(tcx.hir().name(id).as_str(), place),
+                                    None => struct_fmt.field("{extra}", place)
+                                };
                             }
                         } else {
                             for (index, place) in places.iter().enumerate() {

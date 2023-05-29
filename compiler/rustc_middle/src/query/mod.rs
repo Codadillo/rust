@@ -424,7 +424,7 @@ rustc_queries! {
 
     // todo: maybe this shouldn't return a steal, 
     // but i'm unsure of the best way to integrate the
-    // resultant mir into the mir queries so i'll keep it for now
+    // resultant mir into the mir-producing queries so i'll keep it for now
     query mir_for_generator_inner_fn(
         key: LocalDefId
     ) -> Option<&'tcx Steal<mir::Body<'tcx>>> {

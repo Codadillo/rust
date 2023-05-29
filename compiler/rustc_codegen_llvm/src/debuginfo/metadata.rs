@@ -1002,8 +1002,8 @@ fn build_upvar_field_di_nodes<'ll, 'tcx>(
     closure_or_generator_di_node: &'ll DIType,
 ) -> SmallVec<&'ll DIType> {
     let (&def_id, up_var_tys) = match closure_or_generator_ty.kind() {
-        ty::Generator(def_id, substs, _) => {
-            let upvar_tys: SmallVec<_> = substs.as_generator().prefix_tys().collect();
+        ty::Generator(def_id, _, _) => {
+            let upvar_tys: SmallVec<_> = closure_or_generator_ty.generator_prefix_tys(cx.tcx).unwrap().collect();
             (def_id, upvar_tys)
         }
         ty::Closure(def_id, substs) => {

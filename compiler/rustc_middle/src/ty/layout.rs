@@ -883,7 +883,7 @@ where
                         if i == tag_field {
                             return TyMaybeWithLayout::TyAndLayout(tag_layout(tag));
                         }
-                        TyMaybeWithLayout::Ty(substs.as_generator().prefix_tys().nth(i).unwrap())
+                        TyMaybeWithLayout::Ty(this.ty.generator_prefix_tys(tcx).unwrap().nth(i).unwrap())
                     }
                 },
 

@@ -2313,6 +2313,10 @@ impl<'tcx> TyCtxt<'tcx> {
         self.def_kind(trait_def_id) == DefKind::TraitAlias
     }
 
+    pub fn generator_unresumed_inner_fn(self, def_id: DefId) -> Option<(crate::mir::Operand<'tcx>, Ty<'tcx>)> {
+        self.optimized_mir(def_id).generator.as_ref().and_then(|gen| gen.unresumed_inner_func.clone())
+    }
+
     /// Returns layout of a generator. Layout might be unavailable if the
     /// generator is tainted by errors.
     pub fn generator_layout(self, def_id: DefId) -> Option<&'tcx GeneratorLayout<'tcx>> {

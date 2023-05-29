@@ -1797,6 +1797,7 @@ fn resolution_failure(
                             | Field
                             | Closure
                             | Generator
+                            | GeneratorInnerFn
                             | AssocTy
                             | AssocConst
                             | AssocFn
