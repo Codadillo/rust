@@ -457,9 +457,15 @@ pub fn type_di_node<'ll, 'tcx>(cx: &CodegenCx<'ll, 'tcx>, t: Ty<'tcx>) -> &'ll D
             AdtKind::Union => build_union_type_di_node(cx, unique_type_id),
             AdtKind::Enum => enums::build_enum_type_di_node(cx, unique_type_id),
         },
-        ty::Tuple(_) => build_tuple_type_di_node(cx, unique_type_id),
+        ty::Tuple(_) => build_tuple_type_di_node(cx, unique_type_id, None),
         // Type parameters from polymorphized functions.
         ty::Param(_) => build_param_type_di_node(cx, t),
+
+        // todo: this should be something or else. also, should this branch even be reachable??
+        ty::GeneratorWitness(substs) => {
+            let override_type = cx.tcx.mk_tup_from_iter(substs.skip_binder().iter());
+            build_tuple_type_di_node(cx, unique_type_id, Some(override_type))
+        }
         _ => bug!("debuginfo: unexpected type in type_di_node(): {:?}", t),
     };
 
@@ -676,7 +682,7 @@ fn build_basic_type_di_node<'ll, 'tcx>(
         ty::Never => ("!", DW_ATE_unsigned),
         ty::Tuple(elements) if elements.is_empty() => {
             if cpp_like_debuginfo {
-                return build_tuple_type_di_node(cx, UniqueTypeId::for_ty(cx.tcx, t));
+                return build_tuple_type_di_node(cx, UniqueTypeId::for_ty(cx.tcx, t), None);
             } else {
                 ("()", DW_ATE_unsigned)
             }
@@ -1003,7 +1009,8 @@ fn build_upvar_field_di_nodes<'ll, 'tcx>(
 ) -> SmallVec<&'ll DIType> {
     let (&def_id, up_var_tys) = match closure_or_generator_ty.kind() {
         ty::Generator(def_id, _, _) => {
-            let upvar_tys: SmallVec<_> = closure_or_generator_ty.generator_prefix_tys(cx.tcx).unwrap().collect();
+            let upvar_tys: SmallVec<_> =
+                closure_or_generator_ty.generator_prefix_tys(cx.tcx).unwrap().collect();
             (def_id, upvar_tys)
         }
         ty::Closure(def_id, substs) => {
@@ -1049,8 +1056,9 @@ fn build_upvar_field_di_nodes<'ll, 'tcx>(
 fn build_tuple_type_di_node<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
     unique_type_id: UniqueTypeId<'tcx>,
+    overide_type: Option<Ty<'tcx>>,
 ) -> DINodeCreationResult<'ll> {
-    let tuple_type = unique_type_id.expect_ty();
+    let tuple_type = overide_type.unwrap_or(unique_type_id.expect_ty());
     let &ty::Tuple(component_types) = tuple_type.kind() else {
         bug!("build_tuple_type_di_node() called with non-tuple-type: {:?}", tuple_type)
     };

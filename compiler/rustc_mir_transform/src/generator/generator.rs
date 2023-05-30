@@ -79,7 +79,6 @@ use rustc_span::Span;
 use rustc_target::abi::{FieldIdx, VariantIdx};
 use rustc_target::spec::PanicStrategy;
 use std::ops;
-
 pub struct StateTransform;
 
 struct RenameLocalVisitor<'tcx> {
@@ -1247,8 +1246,9 @@ fn create_generator_resume_function<'tcx>(
     mut transform: TransformVisitor<'tcx>,
     body: &mut Body<'tcx>,
     can_return: bool,
-    can_unwind: bool,
 ) {
+    let can_unwind = can_unwind(tcx, body);
+
     // Poison the generator when it unwinds
     if can_unwind {
         let source_info = SourceInfo::outermost(body.span);
@@ -1320,6 +1320,10 @@ fn create_generator_resume_function<'tcx>(
     // Then, assign these bodies to our resume functions accordingly
     let source_info = SourceInfo::outermost(body.span);
     for (state, mut case_start) in cases {
+        if state == POISONED && !can_unwind {
+            continue;
+        }
+
         let mut inner_body = body.clone();
         // todo: should I make these new bodies not generators? i.e.
         // inner_body.generator = None;
@@ -1333,7 +1337,9 @@ fn create_generator_resume_function<'tcx>(
 
         simplify::remove_dead_blocks(tcx, &mut inner_body);
 
-        dump_mir(tcx, false, "generator_resume_inner", &state, &inner_body, |_, _| Ok(()));
+        let mut simpl = inner_body.clone();
+        simplify::simplify_locals(&mut simpl, tcx);
+        dump_mir(tcx, false, "generator_resume_inner", &state, &simpl, |_, _| Ok(()));
 
         // Finish building our inner resume function
         let (resume_builder, _) = transform.resume_fns.remove(&VariantIdx::new(state)).unwrap();
@@ -1366,17 +1372,16 @@ fn create_generator_resume_function<'tcx>(
         fn_span: body.span,
     };
 
-    body[START_BLOCK] = BasicBlockData::new(Some(Terminator {
-        source_info,
-        kind: call_inner,
-    }));
+    body[START_BLOCK] = BasicBlockData::new(Some(Terminator { source_info, kind: call_inner }));
     deref_finder(tcx, body);
 
     // Make sure we remove dead blocks to remove
     // unrelated code from the drop part of the function
     simplify::remove_dead_blocks(tcx, body);
 
-    dump_mir(tcx, false, "generator_resume", &0, body, |_, _| Ok(()));
+    let mut simpl = body.clone();
+    simplify::simplify_locals(&mut simpl, tcx);
+    dump_mir(tcx, false, "generator_resume", &0, &simpl, |_, _| Ok(()));
 }
 
 fn insert_clean_drop(body: &mut Body<'_>) -> BasicBlock {
@@ -1480,6 +1485,10 @@ pub(crate) fn mir_generator_witnesses<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: LocalDefId,
 ) -> GeneratorLayout<'tcx> {
+    if false {
+        return super::generator_classic::mir_generator_witnesses(tcx, def_id);
+    }
+
     assert!(tcx.sess.opts.unstable_opts.drop_tracking_mir);
 
     let (body, _) = tcx.mir_promoted(def_id);
@@ -1530,8 +1539,14 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
 
             let source_info = SourceInfo::outermost(body.span);
             for &(block_idx, stmt_idx, gen_id) in &constructors {
-                let (resume_fn, resume_ptr_ty) =
-                    tcx.generator_unresumed_inner_fn(gen_id).unwrap();
+                // If tcx.generator_unresumed_inner_fn returns None,
+                // that's because this generator was transformed using
+                // generator_classic::StateTransform
+                let Some((resume_fn, resume_ptr_ty)) =
+                    tcx.generator_unresumed_inner_fn(gen_id) else {
+                        continue
+                    };
+
                 let resume_ptr_local = body.local_decls.push(LocalDecl::new(resume_ptr_ty, body.span));
 
                 let block = &mut body.basic_blocks_mut()[BasicBlock::new(block_idx)];
@@ -1568,6 +1583,12 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
         };
 
         assert!(body.generator_drop().is_none());
+
+        // Check if this generator was labeled for compilation with generator_classic.
+        // If it was, use generator_classic::StateTransform instead.
+        if should_use_generator_classic(tcx, body.source.def_id()) {
+            return super::generator_classic::StateTransform.run_pass(tcx, body);
+        }
 
         dump_mir(tcx, false, "generator_pre-anything", &0, body, |_, _| Ok(()));
 
@@ -1668,7 +1689,6 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
         }
 
         let can_return = can_return(tcx, body, tcx.param_env(body.source.def_id()));
-        let can_unwind = can_unwind(tcx, body);
 
         // Calculate the type and place of the inner resume function pointer prefix field
         let (inner_resume_ptr_ty, resume_fn_field_idx) = {
@@ -1687,7 +1707,10 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
         // Create the stubs for our inner resume functions, one for each state
         let mut resume_fns = FxHashMap::default();
         for state in 0..layout.variant_fields.len() {
-            if (!can_return && state == RETURNED) || (!can_unwind && state == POISONED) {
+            // Ideally, we also wouldn't make the function corresponding to POISONED
+            // if it's unnecessary (i.e. the body cannot unwind), but you can't
+            // call can_unwind before the TransformVisitor and I'm lazy.
+            if !can_return && state == RETURNED {
                 continue;
             }
 
@@ -1762,12 +1785,15 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
         let drop_shim =
             create_generator_drop_shim(tcx, &transform, gen_ty, body.clone(), drop_clean);
 
+        // todo: generator drop obviously needs to be changed, as it expects
+        // the discriminant to be set according to the current state,
+        // even though we don't do that anymore in resume. it causes UB right now.
         body.generator.as_mut().unwrap().generator_drop = Some(drop_shim);
 
         // Create the Generator::resume / Future::poll function
         // as well as the internal fabricated functions that are called
         // by the main resume / poll function
-        create_generator_resume_function(tcx, transform, body, can_return, can_unwind);
+        create_generator_resume_function(tcx, transform, body, can_return);
     }
 }
 
@@ -2180,4 +2206,11 @@ fn check_must_not_suspend_def(
     } else {
         false
     }
+}
+
+// todo: using a doc comment is just a temporary hack
+fn should_use_generator_classic<'tcx>(tcx: TyCtxt<'tcx>, gen_id: DefId) -> bool {
+    tcx.get_attrs(gen_id, sym::doc)
+        .find(|attr| attr.doc_str() == Some(rustc_span::Symbol::intern("generator_classic")))
+        .is_some()
 }

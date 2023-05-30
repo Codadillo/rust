@@ -382,7 +382,7 @@ pub fn build_generator_variant_struct_type_di_node<'ll, 'tcx>(
                     build_field_di_node(
                         cx,
                         variant_struct_type_di_node,
-                        &common_upvar_names[index],
+                        common_upvar_names.get(index).map(String::as_str).unwrap_or("inner_resume"),
                         cx.size_and_align_of(upvar_ty),
                         generator_type_and_layout.fields.offset(index),
                         DIFlags::FlagZero,

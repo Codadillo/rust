@@ -2176,7 +2176,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                             {
                                 match var_id {
                                     Some(&id) => struct_fmt.field(tcx.hir().name(id).as_str(), place),
-                                    None => struct_fmt.field("{extra}", place)
+                                    None => struct_fmt.field("{inner_resume}", place)
                                 };
                             }
                         } else {
