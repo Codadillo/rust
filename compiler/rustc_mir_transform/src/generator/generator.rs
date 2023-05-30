@@ -1782,12 +1782,14 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
         dump_mir(tcx, false, "generator_post-transform", &0, body, |_, _| Ok(()));
 
         // Create a copy of our MIR and use it to create the drop shim for the generator
-        let drop_shim =
+        let mut drop_shim =
             create_generator_drop_shim(tcx, &transform, gen_ty, body.clone(), drop_clean);
 
         // todo: generator drop obviously needs to be changed, as it expects
         // the discriminant to be set according to the current state,
         // even though we don't do that anymore in resume. it causes UB right now.
+        drop_shim.basic_blocks_mut().raw[0] =
+            BasicBlockData::new(Some(Terminator { source_info, kind: TerminatorKind::Return }));
         body.generator.as_mut().unwrap().generator_drop = Some(drop_shim);
 
         // Create the Generator::resume / Future::poll function
