@@ -589,8 +589,10 @@ fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
 /// Optimize the MIR and prepare it for codegen.
 fn optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> &Body<'_> {
     if let Some(body) = tcx.mir_for_generator_inner_fn(did) {
-        // println!("LOL");
-        return tcx.arena.alloc(body.steal());
+        let mut body = body.steal();
+        run_optimization_passes(tcx, &mut body);
+
+        return tcx.arena.alloc(body);
     }
 
     tcx.arena.alloc(inner_optimized_mir(tcx, did))
@@ -628,6 +630,8 @@ fn promoted_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> &IndexVec<Promoted, Body<'_
     if tcx.is_constructor(def.to_def_id()) {
         return tcx.arena.alloc(IndexVec::new());
     }
+
+
 
     let tainted_by_errors = tcx.mir_borrowck(def).tainted_by_errors;
     let mut promoted = tcx.mir_promoted(def).1.steal();
