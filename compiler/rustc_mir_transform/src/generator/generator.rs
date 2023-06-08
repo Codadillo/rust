@@ -1862,8 +1862,11 @@ impl<'tcx> FabricatedFnBuilder<'tcx> {
             tcx.at(span).create_def(source_def_id, hir::definitions::DefPathData::GeneratorInnerFn);
 
         feeder.opt_def_kind(Some(hir::def::DefKind::GeneratorInnerFn));
-        feeder.opt_local_def_id_to_hir_id(None);
         feeder.def_ident_span(Some(span));
+
+        // feeder.opt_local_def_id_to_hir_id(None);
+        // todo: this is not a good idea
+        feeder.opt_local_def_id_to_hir_id(tcx.opt_local_def_id_to_hir_id(source_def_id));
 
         feeder.generics_of(tcx.generics_of(source_def_id).clone());
         feeder.explicit_predicates_of(tcx.explicit_predicates_of(source_def_id));
