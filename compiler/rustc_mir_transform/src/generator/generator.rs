@@ -1336,6 +1336,10 @@ fn create_generator_resume_function<'tcx>(
         }));
 
         simplify::remove_dead_blocks(tcx, &mut inner_body);
+        RemoveRedundantInnerAssignsTransform {
+            tcx,
+            inner_resume_handle: &transform.resume_fns.get(&VariantIdx::new(state)).unwrap().1
+        }.visit_body(&mut inner_body);
 
         let mut simpl = inner_body.clone();
         simplify::simplify_locals(&mut simpl, tcx);
@@ -1382,6 +1386,47 @@ fn create_generator_resume_function<'tcx>(
     let mut simpl = body.clone();
     simplify::simplify_locals(&mut simpl, tcx);
     dump_mir(tcx, false, "generator_resume", &0, &simpl, |_, _| Ok(()));
+}
+
+struct FindOperand<'tcx, 'a> {
+    operand: &'a Operand<'tcx>,
+    found: bool,
+}
+
+impl<'tcx, 'a> Visitor<'tcx> for FindOperand<'tcx, 'a> {
+    fn visit_operand(&mut self, operand: &Operand<'tcx>, location: Location) {
+        if operand == self.operand {
+            self.found = true;
+        }
+
+        self.super_operand(operand, location);
+    }
+}
+
+struct RemoveRedundantInnerAssignsTransform<'tcx, 'a> {
+    tcx: TyCtxt<'tcx>,
+    inner_resume_handle: &'a Operand<'tcx>,
+}
+
+impl<'tcx, 'a> MutVisitor<'tcx> for RemoveRedundantInnerAssignsTransform<'tcx, 'a> {
+    fn tcx(&self) -> TyCtxt<'tcx> {
+        self.tcx
+    }
+
+    fn visit_statement(&mut self, statement: &mut Statement<'tcx>, location: Location) {
+        let mut finder = FindOperand {
+            operand: self.inner_resume_handle,
+            found: false
+        };
+        
+        finder.visit_statement(statement, location);
+
+        if finder.found {
+            statement.make_nop();
+        }
+
+        self.super_statement(statement, location);
+    }
 }
 
 fn insert_clean_drop(body: &mut Body<'_>) -> BasicBlock {
