@@ -236,7 +236,7 @@ pub trait Machine<'tcx>: Sized {
     /// target features is requires.
     fn check_fn_target_features(
         _ecx: &InterpCx<'tcx, Self>,
-        _instance: ty::Instance<'tcx>,
+        _instance: rustc_middle::ty::Instance<'tcx>,
     ) -> InterpResult<'tcx>;
 
     /// Called to evaluate `Assert` MIR terminators that trigger a panic.
@@ -293,10 +293,11 @@ pub trait Machine<'tcx>: Sized {
     fn float_fuse_mul_add(_ecx: &InterpCx<'tcx, Self>) -> bool;
 
     /// Called before a statement or terminator is executed.
+    /// `instance` is the (monomorphized) instance of the active frame.
     #[inline]
     fn before_location(
         _ecx: &mut InterpCx<'tcx, Self>,
-        _def_id: DefId,
+        _instance: ty::Instance<'tcx>,
         _loc: mir::Location,
     ) -> InterpResult<'tcx> {
         interp_ok(())

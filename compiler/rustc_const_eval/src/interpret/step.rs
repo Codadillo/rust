@@ -52,7 +52,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         };
         let basic_block = &self.body().basic_blocks[loc.block];
 
-        M::before_location(self, self.frame().instance.def_id(), loc)?;
+        M::before_location(self, self.frame().instance, loc)?;
 
         if let Some(stmt) = basic_block.statements.get(loc.statement_index) {
             let old_frames = self.frame_idx();

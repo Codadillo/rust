@@ -146,11 +146,11 @@ The static-index logging support is split between rustc's interpreter hook and M
 
 * `compiler/rustc_const_eval/src/interpret/machine.rs`
   * Added a default no-op `Machine::before_location` hook.
-  * The hook receives the active `DefId` and MIR `Location`.
+  * The hook receives the active frame's `Instance` and MIR `Location`.
   * Keeping the default no-op matters because the hook is now called by the generic interpreter, not only by Miri.
 
 * `compiler/rustc_const_eval/src/interpret/step.rs`
-  * Calls `M::before_location(self, self.frame().instance.def_id(), loc)?` before evaluating each MIR statement or terminator.
+  * Calls `M::before_location(self, self.frame().instance, loc)?` before evaluating each MIR statement or terminator.
   * This is the single point where the execution stream is observed.
 
 * `src/tools/miri/src/bin/miri.rs`
@@ -167,16 +167,18 @@ The static-index logging support is split between rustc's interpreter hook and M
   * Added `StaticIndexLoggingConfig`, currently holding a buffered output writer.
   * Added `MiriMachine::static_index_logging`.
   * Opens the configured logfile with an 8 MiB `BufWriter`.
-  * Writes two header lines before any location entries:
+  * Writes three header lines before any location entries:
     ```text
     <tcx.sess.cfg_version>
     1.97.0-nightly (f53b654a8 2026-04-30)
+    static-index-log instances-v2
     ```
   * The second line is intentionally pinned to the compiler version corresponding to `0.15.2-nightly-2026-05-01`; this keeps logs comparable even though the local stage1 compiler reports `1.97.0-dev`.
   * Implements `Machine::before_location` for Miri and writes one line per executed location:
     ```text
-    <def_id.index> <def_id.krate.index> <basic_block.index> <statement_index>
+    <def_id.index> <def_id.krate.index> <basic_block.index> <statement_index> <instance_id>
     ```
+    where `def_id` is the definition of the executing frame's `Instance`, and `instance_id` is a log-local id declared the first time that instance runs by a line `@ <instance_id> <Display of the instance, without trimmed paths>`. A third header line, `static-index-log instances-v2`, identifies this format. Logging instances rather than `DefId`s distinguishes monomorphizations of generic functions; `ppa` matches the declared instance text against its own instances (`ppa/src/instance.rs`).
   * The current code uses `File::create(path).unwrap()`, so the parent directory must already exist. For example, create `log-dump/` before passing `-Zmiri-static-index-logfile=log-dump/logs-miri.txt`.
 
 * `src/tools/miri/Cargo.toml`
@@ -315,3 +317,41 @@ git diff --check
 ```
 
 Both passed.
+
+## 2026-09-21 Fresh Checkout Setup
+
+Built this checkout with its local interpreter-hook and instance-logging changes.
+
+* Initialized `library/backtrace` and `src/llvm-project`. This revision has no
+  `library/stdarch` submodule, and the installed `nightly-2026-05-01` Cargo means
+  `src/tools/cargo` is not needed for `run-miri.sh`.
+* Created local, Git-ignored `bootstrap.toml` with `download-ci-llvm = false`,
+  LLVM targets `AArch64;ARM;RISCV;X86`, no experimental LLVM targets,
+  `download-rustc = false`, debug assertions, incremental compilation, and
+  debuginfo level 1. Enabled the `miri` and `cargo-miri` tools and disabled
+  automatic submodule updates.
+* Added `exclude = ["rust"]` to the parent project's `[workspace]` in
+  `../Cargo.toml`. Without this, Cargo incorrectly associates `src/bootstrap`
+  with the parent workspace and refuses to build it.
+* Used the existing Homebrew libffi 3.5.2 via `PKG_CONFIG_PATH`.
+
+The complete build command was:
+
+```bash
+PKG_CONFIG_PATH=/opt/homebrew/opt/libffi/lib/pkgconfig \
+  ./x build --stage 1 src/tools/miri src/tools/miri/cargo-miri library/std library/proc_macro
+```
+
+End-to-end verification succeeded with:
+
+```bash
+./run-miri.sh --crate ../test-crate \
+  --miri-arg "-Zmiri-static-index-logfile=$PWD/build/miri-smoke-instances.log"
+```
+
+The helper created the Miri sysroot, compiled the crate's proc macro dependency,
+and ran the crate successfully. The log contained 29,881 executed locations and
+497 instance declarations; every location referenced an already declared instance,
+and the third header line was `static-index-log instances-v2`. The external
+crate uses the parent workspace's `target` directory, so running it from a
+sandbox restricted to this Rust checkout requires permission to write there.

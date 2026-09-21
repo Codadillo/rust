@@ -662,12 +662,24 @@ pub struct MiriMachine<'tcx> {
     pub short_fd_operations: bool,
 
     /// Where to log static indices.
-    pub static_index_logging: Option<StaticIndexLoggingConfig>,
+    pub static_index_logging: Option<StaticIndexLoggingConfig<'tcx>>,
 }
 
-pub struct StaticIndexLoggingConfig {
+pub struct StaticIndexLoggingConfig<'tcx> {
     pub output: Box<dyn std::io::Write>,
+    /// The log-local id of every instance we have already declared in the log.
+    pub declared_instances: FxHashMap<Instance<'tcx>, usize>,
 }
+
+/// The third header line of a static index log, identifying the line format.
+///
+/// The log has two kinds of lines. The first time an instance executes, a declaration
+/// `@ <id> <instance>` is written, where `<id>` counts up from 0 and `<instance>` is the
+/// instance rendered with `Display` and without trimmed paths. Every executed location is
+/// then `<def_index> <def_krate> <block> <statement> <id>`, where the numeric `DefId` is that
+/// of the instance's definition and `<id>` is the declared id of the instance that ran.
+/// Instances, unlike `DefId`s, tell apart the monomorphizations of a generic function.
+const STATIC_INDEX_LOG_FORMAT: &str = "static-index-log instances-v2";
 
 /// Compiler version corresponding to Miri 0.15.2-nightly-2026-05-01.
 const STATIC_INDEX_COMPILER_VERSION: &str = "1.97.0-nightly (f53b654a8 2026-04-30)";
@@ -844,8 +856,9 @@ impl<'tcx> MiriMachine<'tcx> {
                 ));
                 writeln!(output, "{}", tcx.sess.cfg_version).unwrap();
                 writeln!(output, "{STATIC_INDEX_COMPILER_VERSION}").unwrap();
+                writeln!(output, "{STATIC_INDEX_LOG_FORMAT}").unwrap();
 
-                StaticIndexLoggingConfig { output }
+                StaticIndexLoggingConfig { output, declared_instances: FxHashMap::default() }
             }),
         }
     }
@@ -1144,17 +1157,26 @@ impl<'tcx> Machine<'tcx> for MiriMachine<'tcx> {
     #[inline(always)]
     fn before_location(
         ecx: &mut InterpCx<'tcx, Self>,
-        def_id: DefId,
+        instance: Instance<'tcx>,
         loc: mir::Location,
     ) -> InterpResult<'tcx> {
         if let Some(logging_config) = ecx.machine.static_index_logging.as_mut() {
+            let next_id = logging_config.declared_instances.len();
+            let id = *logging_config.declared_instances.entry(instance).or_insert(next_id);
+            if id == next_id {
+                let rendered = rustc_middle::ty::print::with_no_trimmed_paths!(instance.to_string());
+                writeln!(logging_config.output, "@ {id} {rendered}").unwrap();
+            }
+
+            let def_id = instance.def_id();
             writeln!(
                 logging_config.output,
-                "{} {} {} {}",
+                "{} {} {} {} {}",
                 def_id.index.index(),
                 def_id.krate.index(),
                 loc.block.index(),
                 loc.statement_index,
+                id,
             )
             .unwrap();
         }
