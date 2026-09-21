@@ -660,7 +660,17 @@ pub struct MiriMachine<'tcx> {
 
     /// Whether Miri artificially introduces short reads/writes on file descriptors.
     pub short_fd_operations: bool,
+
+    /// Where to log static indices.
+    pub static_index_logging: Option<StaticIndexLoggingConfig>,
 }
+
+pub struct StaticIndexLoggingConfig {
+    pub output: Box<dyn std::io::Write>,
+}
+
+/// Compiler version corresponding to Miri 0.15.2-nightly-2026-05-01.
+const STATIC_INDEX_COMPILER_VERSION: &str = "1.97.0-nightly (f53b654a8 2026-04-30)";
 
 impl<'tcx> MiriMachine<'tcx> {
     /// Create a new MiriMachine.
@@ -825,6 +835,18 @@ impl<'tcx> MiriMachine<'tcx> {
             float_nondet: config.float_nondet,
             float_rounding_error: config.float_rounding_error,
             short_fd_operations: config.short_fd_operations,
+            static_index_logging: config.static_index_logging.as_ref().map(|path| {
+                use std::io::Write;
+
+                let mut output = Box::new(std::io::BufWriter::with_capacity(
+                    8 * 1024 * 1024,
+                    std::fs::File::create(path).unwrap(),
+                ));
+                writeln!(output, "{}", tcx.sess.cfg_version).unwrap();
+                writeln!(output, "{STATIC_INDEX_COMPILER_VERSION}").unwrap();
+
+                StaticIndexLoggingConfig { output }
+            }),
         }
     }
 
@@ -1060,6 +1082,7 @@ impl VisitProvenance for MiriMachine<'_> {
             float_nondet: _,
             float_rounding_error: _,
             short_fd_operations: _,
+            static_index_logging: _,
         } = self;
 
         threads.visit_provenance(visit);
@@ -1117,6 +1140,27 @@ impl<'tcx> Machine<'tcx> for MiriMachine<'tcx> {
     const GLOBAL_KIND: Option<MiriMemoryKind> = Some(MiriMemoryKind::Global);
 
     const PANIC_ON_ALLOC_FAIL: bool = false;
+
+    #[inline(always)]
+    fn before_location(
+        ecx: &mut InterpCx<'tcx, Self>,
+        def_id: DefId,
+        loc: mir::Location,
+    ) -> InterpResult<'tcx> {
+        if let Some(logging_config) = ecx.machine.static_index_logging.as_mut() {
+            writeln!(
+                logging_config.output,
+                "{} {} {} {}",
+                def_id.index.index(),
+                def_id.krate.index(),
+                loc.block.index(),
+                loc.statement_index,
+            )
+            .unwrap();
+        }
+
+        interp_ok(())
+    }
 
     #[inline(always)]
     fn enforce_alignment(ecx: &MiriInterpCx<'tcx>) -> bool {

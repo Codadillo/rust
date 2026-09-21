@@ -292,6 +292,16 @@ pub trait Machine<'tcx>: Sized {
     /// Determines whether the `fmuladd` intrinsics fuse the multiply-add or use separate operations.
     fn float_fuse_mul_add(_ecx: &InterpCx<'tcx, Self>) -> bool;
 
+    /// Called before a statement or terminator is executed.
+    #[inline]
+    fn before_location(
+        _ecx: &mut InterpCx<'tcx, Self>,
+        _def_id: DefId,
+        _loc: mir::Location,
+    ) -> InterpResult<'tcx> {
+        interp_ok(())
+    }
+
     /// Called before a basic block terminator is executed.
     #[inline]
     fn before_terminator(_ecx: &mut InterpCx<'tcx, Self>) -> InterpResult<'tcx> {

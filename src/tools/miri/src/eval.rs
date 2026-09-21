@@ -118,6 +118,8 @@ pub struct MiriConfig {
     pub short_fd_operations: bool,
     /// A list of crates that are considered user-relevant.
     pub user_relevant_crates: Vec<String>,
+    /// Where to log static indices.
+    pub static_index_logging: Option<PathBuf>,
 }
 
 impl Default for MiriConfig {
@@ -161,6 +163,7 @@ impl Default for MiriConfig {
             float_rounding_error: FloatRoundingErrorMode::Random,
             short_fd_operations: true,
             user_relevant_crates: vec![],
+            static_index_logging: None,
         }
     }
 }
