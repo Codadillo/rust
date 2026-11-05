@@ -674,12 +674,54 @@ pub struct StaticIndexLoggingConfig<'tcx> {
 /// The third header line of a static index log, identifying the line format.
 ///
 /// The log has two kinds of lines. The first time an instance executes, a declaration
-/// `@ <id> <instance>` is written, where `<id>` counts up from 0 and `<instance>` is the
-/// instance rendered with `Display` and without trimmed paths. Every executed location is
-/// then `<def_index> <def_krate> <block> <statement> <id>`, where the numeric `DefId` is that
+/// `@ <id> <shape> <instance>` is written, where `<id>` counts up from 0, `<shape>` is
+/// [`body_shape`] of the instance's MIR in hex, and `<instance>` is the instance rendered
+/// with `Display` and without trimmed paths. Every executed location is then
+/// `<def_index> <def_krate> <block> <statement> <id>`, where the numeric `DefId` is that
 /// of the instance's definition and `<id>` is the declared id of the instance that ran.
 /// Instances, unlike `DefId`s, tell apart the monomorphizations of a generic function.
-const STATIC_INDEX_LOG_FORMAT: &str = "static-index-log instances-v2";
+const STATIC_INDEX_LOG_FORMAT: &str = "static-index-log instances-v3";
+
+/// A fingerprint of a body's control-flow shape: its blocks, in order, with each one's
+/// cleanup flag, terminator kind and successors.
+///
+/// The analysis computes the same fingerprint from the MIR it reads and uses a recorded
+/// instance only when the two agree. The standard library Miri runs is built with other
+/// flags than the one a toolchain ships, so the same function can have other blocks there;
+/// without the check its recorded blocks would be filed under the wrong ones. Keep this in
+/// step with `body_shape` in ppa's `instance.rs`.
+pub fn body_shape(body: &mir::Body<'_>) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    body.basic_blocks.len().hash(&mut hasher);
+    for data in body.basic_blocks.iter() {
+        data.is_cleanup.hash(&mut hasher);
+        let terminator = data.terminator();
+        let kind: u8 = match terminator.kind {
+            mir::TerminatorKind::Goto { .. } => 0,
+            mir::TerminatorKind::SwitchInt { .. } => 1,
+            mir::TerminatorKind::UnwindResume => 2,
+            mir::TerminatorKind::UnwindTerminate(_) => 3,
+            mir::TerminatorKind::Return => 4,
+            mir::TerminatorKind::Unreachable => 5,
+            mir::TerminatorKind::Drop { .. } => 6,
+            mir::TerminatorKind::Call { .. } => 7,
+            mir::TerminatorKind::TailCall { .. } => 8,
+            mir::TerminatorKind::Assert { .. } => 9,
+            mir::TerminatorKind::Yield { .. } => 10,
+            mir::TerminatorKind::CoroutineDrop => 11,
+            mir::TerminatorKind::FalseEdge { .. } => 12,
+            mir::TerminatorKind::FalseUnwind { .. } => 13,
+            mir::TerminatorKind::InlineAsm { .. } => 14,
+        };
+        kind.hash(&mut hasher);
+        for successor in terminator.successors() {
+            successor.index().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
 
 /// Compiler version corresponding to Miri 0.15.2-nightly-2026-05-01.
 const STATIC_INDEX_COMPILER_VERSION: &str = "1.97.0-nightly (f53b654a8 2026-04-30)";
@@ -1165,7 +1207,8 @@ impl<'tcx> Machine<'tcx> for MiriMachine<'tcx> {
             let id = *logging_config.declared_instances.entry(instance).or_insert(next_id);
             if id == next_id {
                 let rendered = rustc_middle::ty::print::with_no_trimmed_paths!(instance.to_string());
-                writeln!(logging_config.output, "@ {id} {rendered}").unwrap();
+                let shape = body_shape(ecx.tcx.instance_mir(instance.def));
+                writeln!(logging_config.output, "@ {id} {shape:016x} {rendered}").unwrap();
             }
 
             let def_id = instance.def_id();
