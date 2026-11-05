@@ -677,10 +677,13 @@ pub struct StaticIndexLoggingConfig<'tcx> {
 /// `@ <id> <shape> <instance>` is written, where `<id>` counts up from 0, `<shape>` is
 /// [`body_shape`] of the instance's MIR in hex, and `<instance>` is the instance rendered
 /// with `Display` and without trimmed paths. Every executed location is then
-/// `<def_index> <def_krate> <block> <statement> <id>`, where the numeric `DefId` is that
-/// of the instance's definition and `<id>` is the declared id of the instance that ran.
-/// Instances, unlike `DefId`s, tell apart the monomorphizations of a generic function.
-const STATIC_INDEX_LOG_FORMAT: &str = "static-index-log instances-v3";
+/// `<def_index> <def_krate> <block> <statement> <id> <thread>`, where the numeric `DefId`
+/// is that of the instance's definition, `<id>` is the declared id of the instance that
+/// ran, and `<thread>` is Miri's index of the thread it ran on, 0 for the main thread and
+/// counting up in order of creation, which is one less than std's `ThreadId` for the
+/// same thread. Instances, unlike `DefId`s, tell apart the monomorphizations of a generic
+/// function.
+const STATIC_INDEX_LOG_FORMAT: &str = "static-index-log instances-v4";
 
 /// A fingerprint of a body's control-flow shape: its blocks, in order, with each one's
 /// cleanup flag, terminator kind and successors.
@@ -1202,6 +1205,7 @@ impl<'tcx> Machine<'tcx> for MiriMachine<'tcx> {
         instance: Instance<'tcx>,
         loc: mir::Location,
     ) -> InterpResult<'tcx> {
+        let thread = ecx.machine.threads.active_thread().to_u32();
         if let Some(logging_config) = ecx.machine.static_index_logging.as_mut() {
             let next_id = logging_config.declared_instances.len();
             let id = *logging_config.declared_instances.entry(instance).or_insert(next_id);
@@ -1214,12 +1218,13 @@ impl<'tcx> Machine<'tcx> for MiriMachine<'tcx> {
             let def_id = instance.def_id();
             writeln!(
                 logging_config.output,
-                "{} {} {} {} {}",
+                "{} {} {} {} {} {}",
                 def_id.index.index(),
                 def_id.krate.index(),
                 loc.block.index(),
                 loc.statement_index,
                 id,
+                thread,
             )
             .unwrap();
         }
