@@ -665,25 +665,39 @@ pub struct MiriMachine<'tcx> {
     pub static_index_logging: Option<StaticIndexLoggingConfig<'tcx>>,
 }
 
+/// The recording `-Zmiri-static-index-logfile` asks for: every basic block entered, in
+/// order, with the instance it belongs to and the thread it ran on. The format is described
+/// in `before_location`, which writes it.
 pub struct StaticIndexLoggingConfig<'tcx> {
     pub output: Box<dyn std::io::Write>,
     /// The log-local id of every instance we have already declared in the log.
-    pub declared_instances: FxHashMap<Instance<'tcx>, usize>,
+    pub declared_instances: FxHashMap<Instance<'tcx>, u64>,
+    /// The thread the last record was about.
+    pub thread: u32,
+    /// Per thread, the instance its last block was in, with its id.
+    pub current: Vec<Option<(Instance<'tcx>, u64)>>,
 }
 
-/// The third header line of a static index log, identifying the line format.
-///
-/// The log has two kinds of lines. The first time an instance executes, a declaration
-/// `@ <id> <shape> <instance>` is written, where `<id>` counts up from 0, `<shape>` is
-/// [`body_shape`] of the instance's MIR in hex, and `<instance>` is the instance rendered
-/// with `Display` and without trimmed paths. Every executed location is then
-/// `<def_index> <def_krate> <block> <statement> <id> <thread>`, where the numeric `DefId`
-/// is that of the instance's definition, `<id>` is the declared id of the instance that
-/// ran, and `<thread>` is Miri's index of the thread it ran on, 0 for the main thread and
-/// counting up in order of creation, which is one less than std's `ThreadId` for the
-/// same thread. Instances, unlike `DefId`s, tell apart the monomorphizations of a generic
-/// function.
-const STATIC_INDEX_LOG_FORMAT: &str = "static-index-log instances-v4";
+/// Writes `value` as an unsigned LEB128 varint.
+fn write_varint(output: &mut dyn std::io::Write, mut value: u64) {
+    let mut bytes = [0u8; 10];
+    let mut len = 0;
+    loop {
+        let low = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            bytes[len] = low;
+            len += 1;
+            break;
+        }
+        bytes[len] = low | 0x80;
+        len += 1;
+    }
+    output.write_all(&bytes[..len]).unwrap();
+}
+
+/// The third header line of a static index log, identifying the record format.
+const STATIC_INDEX_LOG_FORMAT: &str = "static-index-log blocks-v5";
 
 /// A fingerprint of a body's control-flow shape: its blocks, in order, with each one's
 /// cleanup flag, terminator kind and successors.
@@ -895,15 +909,21 @@ impl<'tcx> MiriMachine<'tcx> {
             static_index_logging: config.static_index_logging.as_ref().map(|path| {
                 use std::io::Write;
 
-                let mut output = Box::new(std::io::BufWriter::with_capacity(
-                    8 * 1024 * 1024,
-                    std::fs::File::create(path).unwrap(),
-                ));
+                // Records are a few bytes each, so they are gathered before they reach the
+                // compressor. Dropping the writer flushes it and finishes the gzip stream.
+                let file = std::fs::File::create(path).unwrap();
+                let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+                let mut output = Box::new(std::io::BufWriter::with_capacity(1 << 20, gzip));
                 writeln!(output, "{}", tcx.sess.cfg_version).unwrap();
                 writeln!(output, "{STATIC_INDEX_COMPILER_VERSION}").unwrap();
                 writeln!(output, "{STATIC_INDEX_LOG_FORMAT}").unwrap();
 
-                StaticIndexLoggingConfig { output, declared_instances: FxHashMap::default() }
+                StaticIndexLoggingConfig {
+                    output,
+                    declared_instances: FxHashMap::default(),
+                    thread: 0,
+                    current: vec![],
+                }
             }),
         }
     }
@@ -1205,29 +1225,85 @@ impl<'tcx> Machine<'tcx> for MiriMachine<'tcx> {
         instance: Instance<'tcx>,
         loc: mir::Location,
     ) -> InterpResult<'tcx> {
-        let thread = ecx.machine.threads.active_thread().to_u32();
-        if let Some(logging_config) = ecx.machine.static_index_logging.as_mut() {
-            let next_id = logging_config.declared_instances.len();
-            let id = *logging_config.declared_instances.entry(instance).or_insert(next_id);
-            if id == next_id {
-                let rendered = rustc_middle::ty::print::with_no_trimmed_paths!(instance.to_string());
-                let shape = body_shape(ecx.tcx.instance_mir(instance.def));
-                writeln!(logging_config.output, "@ {id} {shape:016x} {rendered}").unwrap();
-            }
-
-            let def_id = instance.def_id();
-            writeln!(
-                logging_config.output,
-                "{} {} {} {} {} {}",
-                def_id.index.index(),
-                def_id.krate.index(),
-                loc.block.index(),
-                loc.statement_index,
-                id,
-                thread,
-            )
-            .unwrap();
+        // The static-index log (`-Zmiri-static-index-logfile`), `static-index-log blocks-v5`.
+        //
+        // What it records: every basic block the run enters, in order, each with the
+        // instance it belongs to and the thread it ran on. A block is entered when its first
+        // statement, or its terminator if it has none, is about to run, so this hook writes
+        // for `statement_index == 0` alone. Instances, unlike `DefId`s, tell apart the
+        // monomorphizations of a generic function.
+        //
+        // The file is one gzip stream (see where `static_index_logging` is opened). It
+        // starts with three text lines: the session's `cfg_version`,
+        // `STATIC_INDEX_COMPILER_VERSION`, and `STATIC_INDEX_LOG_FORMAT`. Then binary
+        // records, each beginning with an unsigned LEB128 varint `v`, seven bits a byte, low
+        // bits first, the high bit set on every byte but the last. The two low bits of `v`
+        // say what the record is, and `v >> 2` is its argument:
+        //
+        // - `0`, block: block `v >> 2` was entered, in the instance this thread last ran.
+        //   Nothing follows. Most records are this one, and while the block is below 32
+        //   it is one byte.
+        // - `1`, enter: block `w` of instance `v >> 2` was entered, `w` being the next
+        //   varint. The instance is the id of its declaration. This thread's current
+        //   instance is now that one: written on a call, a return, a callback, whenever the
+        //   instance changes.
+        // - `2`, thread: thread `v >> 2` runs from here on, and the records after it are
+        //   about that thread, each thread keeping its own current instance. Nothing
+        //   follows. The thread is Miri's index, `ThreadId::to_u32`: 0 for the main thread,
+        //   then in order of creation, one less than std's `ThreadId` for the same thread.
+        //   The stream starts on thread 0.
+        // - `3`, declare: the next instance id, ids counting declarations from 0, is the
+        //   instance whose definition has `DefIndex` `v >> 2`. Then the definition's crate
+        //   number as a varint; `body_shape` of its MIR as 8 bytes, little-endian; the
+        //   length of its name as a varint, and the name in UTF-8, the instance rendered
+        //   with `Display` and without trimmed paths. Written once, before the instance's
+        //   first block.
+        //
+        // So a call from `main` to a function it has not called before, and its return,
+        // are: `3` declaring the callee, `1` with the callee's id and its block 0, `0` for
+        // each block of the callee after that, then `1` with `main`'s id and the block the
+        // call returns to. A loop's iterations repeat byte for byte, which gzip takes most
+        // of. The reader is `parse_recording` in ppa's `bnet/training_data.rs`, and
+        // `recordings.py dump` there prints a recording as text: change them with this.
+        if loc.statement_index != 0 {
+            return interp_ok(());
         }
+        let thread = ecx.machine.threads.active_thread().to_u32();
+        let Some(log) = ecx.machine.static_index_logging.as_mut() else {
+            return interp_ok(());
+        };
+        let block = loc.block.index() as u64;
+
+        if thread != log.thread {
+            write_varint(&mut *log.output, (u64::from(thread) << 2) | 2);
+            log.thread = thread;
+        }
+        let slot = thread as usize;
+        if log.current.len() <= slot {
+            log.current.resize(slot + 1, None);
+        }
+        if let Some((current, _)) = log.current[slot]
+            && current == instance
+        {
+            write_varint(&mut *log.output, block << 2);
+            return interp_ok(());
+        }
+
+        let next_id = log.declared_instances.len() as u64;
+        let id = *log.declared_instances.entry(instance).or_insert(next_id);
+        if id == next_id {
+            let def_id = instance.def_id();
+            let rendered = rustc_middle::ty::print::with_no_trimmed_paths!(instance.to_string());
+            let shape = body_shape(ecx.tcx.instance_mir(instance.def));
+            write_varint(&mut *log.output, ((def_id.index.index() as u64) << 2) | 3);
+            write_varint(&mut *log.output, def_id.krate.index() as u64);
+            log.output.write_all(&shape.to_le_bytes()).unwrap();
+            write_varint(&mut *log.output, rendered.len() as u64);
+            log.output.write_all(rendered.as_bytes()).unwrap();
+        }
+        write_varint(&mut *log.output, (id << 2) | 1);
+        write_varint(&mut *log.output, block);
+        log.current[slot] = Some((instance, id));
 
         interp_ok(())
     }

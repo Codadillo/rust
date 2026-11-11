@@ -164,22 +164,26 @@ The static-index logging support is split between rustc's interpreter hook and M
   * Added `MiriConfig::static_index_logging: Option<PathBuf>`.
 
 * `src/tools/miri/src/machine.rs`
-  * Added `StaticIndexLoggingConfig`, currently holding a buffered output writer.
+  * Added `StaticIndexLoggingConfig`: the output, every instance declared so far with its log-local id, the thread the last record was about, and each thread's current instance.
   * Added `MiriMachine::static_index_logging`.
-  * Opens the configured logfile with an 8 MiB `BufWriter`.
-  * Writes three header lines before any location entries:
+  * Opens the configured logfile as one gzip stream (`flate2`, default level), behind a 1 MiB `BufWriter`; dropping the machine flushes it and finishes the stream. A run that dies without dropping it leaves a stream cut short, which `ppa` reads up to where it ends, with a warning.
+  * Writes three text header lines first:
     ```text
     <tcx.sess.cfg_version>
     1.97.0-nightly (f53b654a8 2026-04-30)
-    static-index-log instances-v4
+    static-index-log blocks-v5
     ```
   * The second line is intentionally pinned to the compiler version corresponding to `0.15.2-nightly-2026-05-01`; this keeps logs comparable even though the local stage1 compiler reports `1.97.0-dev`.
-  * Implements `Machine::before_location` for Miri and writes one line per executed location:
-    ```text
-    <def_id.index> <def_id.krate.index> <basic_block.index> <statement_index> <instance_id> <thread>
-    ```
-    where `def_id` is the definition of the executing frame's `Instance`, `instance_id` is a log-local id declared the first time that instance runs by a line `@ <instance_id> <shape> <Display of the instance, without trimmed paths>`, and `thread` is Miri's index of the active thread (`ThreadId::to_u32`), 0 for the main thread and one less than the `std::thread::ThreadId` the log macro prints. `<shape>` is `body_shape` of the instance's MIR in hex: a hash of its blocks' cleanup flags, terminator kinds and successors. A third header line, `static-index-log instances-v4`, identifies this format (`instances-v3` is the same without the thread column, `instances-v2` without shapes either). Logging instances rather than `DefId`s distinguishes monomorphizations of generic functions; `ppa` matches the declared instance text against its own instances (`ppa/src/instance.rs`), and uses one only when its own MIR has the same shape. The shape check exists because the Miri sysroot's standard library is built with other flags than the toolchain's, so a std function can have other blocks under Miri than in the metadata `ppa` reads; `ppa`'s `body_shape` must stay identical to Miri's. `ppa` therefore compiles the crate it analyzes against a Miri sysroot of its own, the one `cargo miri setup` builds for the rustup toolchain, which matches this fork's sysroot as long as `cargo-miri/src/setup.rs` keeps the upstream flags and `library/` is unchanged; the shape check reports any instance where the two drift.
-  * The current code uses `File::create(path).unwrap()`, so the parent directory must already exist. For example, create `log-dump/` before passing `-Zmiri-static-index-logfile=log-dump/logs-miri.txt`.
+  * Implements `Machine::before_location` for Miri and records each basic block entered: the hook returns at once for any location but a block's first (`statement_index == 0`). Records follow the header, each starting with an unsigned LEB128 varint `v` whose two low bits are its kind:
+    * `0`, block: block `v >> 2` of the instance the current thread last ran.
+    * `1`, enter: block `w` of instance `v >> 2`, `w` being the next varint. The thread's current instance is now that one; written on a call, a return, a callback.
+    * `2`, thread: thread `v >> 2` runs from here on, Miri's index of the thread (`ThreadId::to_u32`): 0 for the main thread, one less than the `std::thread::ThreadId` the log macro prints.
+    * `3`, declare: the next instance id, counting declarations from 0, is the instance whose definition has `DefIndex` `v >> 2` and crate number the next varint; then `body_shape` of its MIR as 8 bytes little-endian; then its name's length as a varint and the name, `Display` of the instance without trimmed paths, in UTF-8. Written before the instance's first block.
+  * A block of the current instance below 32 is one byte, and a loop's iterations repeat byte for byte, which gzip then takes most of: `fuzz-0001`'s run, 4.5 million blocks, was 455 MB of text and is 251 KB; `fuzz-0006`'s was 64 MB and is 59 KB; the 42 recordings of `ppa`'s corpus, 16 million blocks, were 1.6 GB and are 1.7 MB. A small recording is mostly its instances' names, about 20 KB. The Miri run takes as long as before.
+  * `<shape>` is a hash of the body's blocks' cleanup flags, terminator kinds and successors. Logging instances rather than `DefId`s distinguishes monomorphizations of generic functions; `ppa` matches the declared instance text against its own instances (`ppa/src/instance.rs`), and uses one only when its own MIR has the same shape. The shape check exists because the Miri sysroot's standard library is built with other flags than the toolchain's, so a std function can have other blocks under Miri than in the metadata `ppa` reads; `ppa`'s `body_shape` must stay identical to Miri's. `ppa` therefore compiles the crate it analyzes against a Miri sysroot of its own, the one `cargo miri setup` builds for the rustup toolchain, which matches this fork's sysroot as long as `cargo-miri/src/setup.rs` keeps the upstream flags and `library/` is unchanged; the shape check reports any instance where the two drift.
+  * The formats before were text, one line per statement executed: `instances-v4` was `<def_index> <def_krate> <block> <statement> <instance_id> <thread>` with declarations `@ <instance_id> <shape> <instance>`; `instances-v3` the same without the thread, `instances-v2` without shapes either. `ppa` no longer reads them, so a recording in one has to be made again. `recordings.py` at the root of the `ppa` repository prints a `blocks-v5` recording as text (`dump`) and summarizes one (`stats`). The comment at the top of `before_location` in `machine.rs` describes the format.
+  * The current code uses `File::create(path).unwrap()`, so the parent directory must already exist. For example, create `log-dump/` before passing `-Zmiri-static-index-logfile=log-dump/logs-miri.rec`.
+  * Added `flate2` as a dependency.
 
 * `src/tools/miri/Cargo.toml`
   * Changed the Unix `libffi` dependency to:
@@ -214,7 +218,7 @@ Example:
 ```bash
 ./run-miri.sh \
     --crate ../../test-rust-nightly2/test-crate/ \
-    --miri-arg -Zmiri-static-index-logfile=log-dump/logs-miri.txt
+    --miri-arg -Zmiri-static-index-logfile=log-dump/logs-miri.rec
 ```
 
 Important behavior in the script:
@@ -290,7 +294,7 @@ This avoids mixing old stage artifacts with the current compiler and avoids the 
 The successful end-to-end command was:
 
 ```bash
-./run-miri.sh --crate ../../test-rust-nightly2/test-crate/ --miri-arg -Zmiri-static-index-logfile=log-dump/logs-miri.txt
+./run-miri.sh --crate ../../test-rust-nightly2/test-crate/ --miri-arg -Zmiri-static-index-logfile=log-dump/logs-miri.rec
 ```
 
 It exited with status 0 and printed:
